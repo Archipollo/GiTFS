@@ -1,5 +1,6 @@
 import { useAppStore } from '../state/app-store';
 import { MODES, MODE_COLOR, MODE_LABEL } from '../gtfs/modes';
+import { yearOfFeed } from '../timeline/math';
 
 export default function LeftPanel() {
   const mode = useAppStore((s) => s.mode);
@@ -10,6 +11,15 @@ export default function LeftPanel() {
   const setActive = useAppStore((s) => s.setActiveFeed);
   const setCompare = useAppStore((s) => s.setCompareFeed);
   const removeFeed = useAppStore((s) => s.removeFeed);
+  const setTimelineYear = useAppStore((s) => s.setTimelineYear);
+
+  const pickActive = (id: string) => {
+    setActive(id);
+    if (mode === 'timeline') {
+      const meta = feeds[id];
+      if (meta) setTimelineYear(yearOfFeed(meta).year);
+    }
+  };
 
   const showStops = useAppStore((s) => s.showStops);
   const setShowStops = useAppStore((s) => s.setShowStops);
@@ -29,7 +39,7 @@ export default function LeftPanel() {
         return (
           <div
             key={id}
-            className={`feed-row ${isActive ? 'active' : ''}`}
+            className={`feed-row ${isActive ? 'active' : ''} ${isCompare ? 'compare' : ''}`}
             title={f.sourceName}
           >
             <div style={{ flex: 1, minWidth: 0 }}>
@@ -43,22 +53,24 @@ export default function LeftPanel() {
             <div style={{ display: 'flex', gap: 4 }}>
               <button
                 title="Set as active"
-                onClick={() => setActive(id)}
+                onClick={() => pickActive(id)}
                 style={{ padding: '2px 6px', fontSize: 11 }}
               >
-                A
+                {isActive ? 'A*' : 'A'}
               </button>
               {mode === 'diff' && (
                 <button
                   title="Set as compare"
                   onClick={() => setCompare(isCompare ? null : id)}
+                  disabled={isActive}
                   style={{
                     padding: '2px 6px',
                     fontSize: 11,
                     borderColor: isCompare ? 'var(--modified)' : undefined,
+                    opacity: isActive ? 0.55 : 1,
                   }}
                 >
-                  B
+                  {isCompare ? 'B*' : 'B'}
                 </button>
               )}
               <button
@@ -101,7 +113,7 @@ export default function LeftPanel() {
 
       <h3>Mode</h3>
       <p className="muted">
-        {mode === 'timeline' && 'Scrub between loaded feeds.'}
+        {mode === 'timeline' && 'Drag the slider to switch the year shown on the map.'}
         {mode === 'diff' && 'Pick A (active) and B (compare) to see changes.'}
         {mode === 'scenario' && 'Scenario editing is not yet implemented.'}
       </p>

@@ -16,7 +16,33 @@ export interface FeedMeta {
   feedEndDate?: string;
 }
 
-interface AppState {
+export type InspectorSelection =
+  | { kind: 'stop'; stopId: string; stopName: string; modes: Mode[]; canonicalId?: string | null }
+  | { kind: 'line'; shapeId: string; modes: Mode[] };
+
+export interface RegistryFocus {
+  kind: 'stop' | 'route';
+  canonicalId: string;
+  /** Pre-computed anchor point for the map; undefined for route canonicals. */
+  lat?: number;
+  lon?: number;
+}
+
+export interface RegistryProgress {
+  stage: string;
+  step: number;
+  total: number;
+  feedLabel?: string;
+}
+
+export interface PinnedEntity {
+  kind: 'stop' | 'route';
+  canonicalId: string;
+  /** Human label for the pin chip. */
+  label: string;
+}
+
+export interface AppState {
   mode: AppMode;
   setMode: (m: AppMode) => void;
 
@@ -29,6 +55,8 @@ interface AppState {
   removeFeed: (id: string) => void;
   setActiveFeed: (id: string | null) => void;
   setCompareFeed: (id: string | null) => void;
+  inspectorSelection: InspectorSelection | null;
+  setInspectorSelection: (selection: InspectorSelection | null) => void;
 
   drawerOpen: boolean;
   toggleDrawer: () => void;
@@ -48,15 +76,42 @@ interface AppState {
   beginMapTask: (id: string, label: string) => void;
   setMapTaskLabel: (id: string, label: string) => void;
   endMapTask: (id: string) => void;
+
+  // Registry build progress (null = idle).
+  registryProgress: RegistryProgress | null;
+  setRegistryProgress: (p: RegistryProgress | null) => void;
+
+  // Drawer
+  drawerTab: 'registry' | 'metrics' | 'diff' | 'changelog';
+  setDrawerTab: (t: AppState['drawerTab']) => void;
+
+  // Registry focus: a selected canonical entity to highlight on the map.
+  registryFocus: RegistryFocus | null;
+  setRegistryFocus: (f: RegistryFocus | null) => void;
+
+  // Timeline mode ----------------------------------------------------------
+  /** Selected year (integer). Null until feeds are known; then snaps to one of them. */
+  timelineYear: number | null;
+  setTimelineYear: (year: number | null) => void;
+
+  /** A pinned canonical entity whose history is shown in the inspector across years. */
+  pinnedEntity: PinnedEntity | null;
+  setPinnedEntity: (p: PinnedEntity | null) => void;
 }
 
 export function selectMapBusy(s: AppState): boolean {
   if (s.ingesting) return true;
+  if (s.registryProgress) return true;
   return Object.keys(s.mapTasks).length > 0;
 }
 
 export function selectMapBusyLabel(s: AppState): string {
   if (s.ingesting) return s.ingesting.progress;
+  if (s.registryProgress) {
+    const rp = s.registryProgress;
+    const feed = rp.feedLabel ? ` (${rp.feedLabel})` : '';
+    return `Registry: ${rp.stage}${feed} — ${rp.step}/${rp.total}`;
+  }
   const keys = Object.keys(s.mapTasks);
   if (keys.length === 0) return '';
   return s.mapTasks[keys[keys.length - 1]];
@@ -64,7 +119,14 @@ export function selectMapBusyLabel(s: AppState): string {
 
 export const useAppStore = create<AppState>((set) => ({
   mode: 'timeline',
-  setMode: (mode) => set({ mode }),
+  setMode: (mode) =>
+    set((s) => {
+      if (mode !== 'diff') return { mode };
+      if (s.feedOrder.length < 2) return { mode, compareFeedId: null };
+      if (s.compareFeedId && s.compareFeedId !== s.activeFeedId) return { mode };
+      const fallback = s.feedOrder.find((id) => id !== s.activeFeedId) ?? null;
+      return { mode, compareFeedId: fallback };
+    }),
 
   feeds: {},
   feedOrder: [],
@@ -90,8 +152,18 @@ export const useAppStore = create<AppState>((set) => ({
       };
     });
   },
-  setActiveFeed: (id) => set({ activeFeedId: id }),
-  setCompareFeed: (id) => set({ compareFeedId: id }),
+  setActiveFeed: (id) =>
+    set((s) => ({
+      activeFeedId: id,
+      compareFeedId: id !== null && s.compareFeedId === id ? null : s.compareFeedId,
+      inspectorSelection: null,
+    })),
+  setCompareFeed: (id) =>
+    set((s) => ({
+      compareFeedId: id === s.activeFeedId ? null : id,
+    })),
+  inspectorSelection: null,
+  setInspectorSelection: (selection) => set({ inspectorSelection: selection }),
 
   drawerOpen: false,
   toggleDrawer: () => set((s) => ({ drawerOpen: !s.drawerOpen })),
@@ -118,4 +190,19 @@ export const useAppStore = create<AppState>((set) => ({
       void _gone;
       return { mapTasks: rest };
     }),
+
+  registryProgress: null,
+  setRegistryProgress: (p) => set({ registryProgress: p }),
+
+  drawerTab: 'registry',
+  setDrawerTab: (drawerTab) => set({ drawerTab }),
+
+  registryFocus: null,
+  setRegistryFocus: (registryFocus) => set({ registryFocus }),
+
+  timelineYear: null,
+  setTimelineYear: (timelineYear) => set({ timelineYear }),
+
+  pinnedEntity: null,
+  setPinnedEntity: (pinnedEntity) => set({ pinnedEntity }),
 }));

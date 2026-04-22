@@ -132,7 +132,7 @@ DuckDB-WASM loader, OPFS persistence, Parquet shard build, MapLibre render of st
 Spatial + name matcher for stops, route matcher, registry UI with override tool. Evaluation harness with hand-labeled truth set.
 
 **M3 — Timeline slider + locked entity (2 wks)**
-Continuous slider, animated play, metrics strip, entity-pin.
+Year slider, animated play, metrics strip, entity-pin.
 
 **M4 — Diff mode (3 wks)**
 IR-level diff over registry, map color overlays, inspector A/B, Monaco text-diff drawer.
@@ -143,12 +143,8 @@ Per-region/per-route time series, coverage areas, service-hour evolution.
 **M6 — Scenario mode (3–4 wks)**
 Patch format, edit UI, scenario-vs-baseline diff.
 
-**M7 — Evaluation & thesis writeup (4+ wks)**
-Case studies: Vorarlberg 2020→2026 (clean), VOR 2020→2026 (scale), one scenario study. Registry precision/recall evaluation on labeled sample.
 
 ## 11. Thesis research questions (pick 2–3)
 
-1. *How can transit entities be reliably tracked across repeated GTFS releases from the same agency, despite ID instability?* — Entity Registry contribution.
-2. *What longitudinal patterns characterize the evolution of Austrian regional PT networks 2020–2026?* — Case study output.
-3. *Can a browser-native architecture handle nationwide-scale GTFS longitudinal analysis, and what are its limits?* — Systems contribution.
-4. *How does scenario-based diffing, grounded in historical trajectory, compare to standalone scenario planning?* — Scenario angle (only if M6 lands).
+1. *How can developments of public transport systems be tracked and their impact on connectivity be visualized and measured?*
+2. *How does scenario-based diffing, grounded in historical trajectory, compare to standalone scenario planning?* 

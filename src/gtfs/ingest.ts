@@ -1,10 +1,16 @@
-import JSZip from 'jszip';
+import {
+  BlobReader,
+  type FileEntry,
+  Uint8ArrayWriter,
+  ZipReader,
+  type Entry,
+} from '@zip.js/zip.js';
 import { getDuckDB, getConnection } from './duckdb';
 import { useAppStore, type FeedMeta } from '../state/app-store';
 import { putRaw, putMeta, putParquet } from './opfs';
 import { markFeedLoaded } from './feed-loader';
 
-// GTFS files we care about in M1. Others (fares_*, translations, etc.) are skipped.
+// GTFS files we care about. Others (fares_*, translations, etc.) are skipped.
 const GTFS_FILES = [
   'agency.txt',
   'stops.txt',
@@ -12,10 +18,7 @@ const GTFS_FILES = [
   'trips.txt',
   'stop_times.txt',
   'calendar.txt',
-  'calendar_dates.txt',
   'shapes.txt',
-  'frequencies.txt',
-  'transfers.txt',
   'feed_info.txt',
 ] as const;
 
@@ -54,9 +57,11 @@ export async function ingestGtfsZip(file: File, opts: IngestOptions = {}): Promi
   setIngesting({ id: feedId, progress: 'reading zip' });
 
   try {
-    const zip = await JSZip.loadAsync(file);
+    const zipReader = new ZipReader(new BlobReader(file));
+    const zipEntries = await zipReader.getEntries();
     const db = await getDuckDB();
     const conn = await getConnection();
+    try {
 
     if (persistRaw) {
       // fire-and-forget — the zip is nice to have but non-blocking
@@ -65,22 +70,17 @@ export async function ingestGtfsZip(file: File, opts: IngestOptions = {}): Promi
 
     const present: GtfsFileName[] = [];
     for (const name of GTFS_FILES) {
-      const entry =
-        zip.file(name) ??
-        zip.file(new RegExp(`(^|/)${name}$`, 'i'))?.[0] ??
-        null;
+      const entry = pickZipEntry(zipEntries, name);
       if (!entry) continue;
 
       setIngesting({ id: feedId, progress: `parsing ${name}` });
-      const text = stripBom(await entry.async('string'));
+      const bytes = await entry.getData!(new Uint8ArrayWriter());
+      const csvBytes = stripUtf8Bom(bytes);
       const csvVirtualPath = `${feedId}/${name}`;
-      await db.registerFileText(csvVirtualPath, text);
+      await db.registerFileBuffer(csvVirtualPath, csvBytes);
 
       const table = qualifiedTable(feedId, name);
-      await conn.query(`
-        CREATE OR REPLACE TABLE ${table} AS
-        SELECT * FROM read_csv_auto('${csvVirtualPath}', header=true, all_varchar=true);
-      `);
+      await conn.query(buildCreateSql(table, csvVirtualPath, name));
       // CSV payload now lives in the table; drop the virtual text to free memory.
       await db.dropFile(csvVirtualPath).catch(() => {});
 
@@ -90,39 +90,81 @@ export async function ingestGtfsZip(file: File, opts: IngestOptions = {}): Promi
       }
       present.push(name);
     }
+      if (!present.includes('stops.txt')) {
+        throw new Error('Zip does not contain stops.txt — not a GTFS feed?');
+      }
 
-    if (!present.includes('stops.txt')) {
-      throw new Error('Zip does not contain stops.txt — not a GTFS feed?');
+      setIngesting({ id: feedId, progress: 'computing summary' });
+      const counts = await readCounts(conn, feedId, present);
+      const [feedStartDate, feedEndDate] = await readFeedDates(conn, feedId, present);
+
+      const label = deriveLabel(file.name, feedStartDate);
+      const meta: FeedMeta = {
+        id: feedId,
+        label,
+        sourceName: file.name,
+        loadedAt: Date.now(),
+        stopCount: counts.stops,
+        routeCount: counts.routes,
+        tripCount: counts.trips,
+        feedStartDate,
+        feedEndDate,
+      };
+
+      if (persistParquet) {
+        putMeta(feedId, meta).catch((err) => console.warn('OPFS putMeta failed', err));
+      }
+
+      markFeedLoaded(feedId);
+      if (!opts.skipStore) addFeed(meta);
+      return meta;
+    } finally {
+      await conn.close().catch(() => {});
+      await zipReader.close().catch(() => {});
     }
-
-    setIngesting({ id: feedId, progress: 'computing summary' });
-    const counts = await readCounts(conn, feedId, present);
-    const [feedStartDate, feedEndDate] = await readFeedDates(conn, feedId, present);
-
-    await conn.close();
-
-    const label = deriveLabel(file.name, feedStartDate);
-    const meta: FeedMeta = {
-      id: feedId,
-      label,
-      sourceName: file.name,
-      loadedAt: Date.now(),
-      stopCount: counts.stops,
-      routeCount: counts.routes,
-      tripCount: counts.trips,
-      feedStartDate,
-      feedEndDate,
-    };
-
-    if (persistParquet) {
-      putMeta(feedId, meta).catch((err) => console.warn('OPFS putMeta failed', err));
-    }
-
-    markFeedLoaded(feedId);
-    if (!opts.skipStore) addFeed(meta);
-    return meta;
   } finally {
     setIngesting(null);
+  }
+}
+
+function pickZipEntry(entries: Entry[], name: GtfsFileName): FileEntry | null {
+  const needle = name.toLowerCase();
+  const match = entries.find((entry) => {
+    if (entry.directory) return false;
+    const filename = entry.filename.toLowerCase();
+    return filename === needle || filename.endsWith(`/${needle}`);
+  });
+  if (!match || match.directory) return null;
+  return match as FileEntry;
+}
+
+function buildCreateSql(table: string, csvVirtualPath: string, name: GtfsFileName): string {
+  const src = `read_csv_auto('${csvVirtualPath}', header=true, all_varchar=true)`;
+  switch (name) {
+    // Small tables — keep everything as varchar so downstream queries can pick
+    // whichever optional columns exist (e.g. route_short_name, agency_id, stop_code).
+    case 'agency.txt':
+    case 'stops.txt':
+    case 'routes.txt':
+    case 'trips.txt':
+    case 'calendar.txt':
+    case 'feed_info.txt':
+      return `CREATE OR REPLACE TABLE ${table} AS SELECT * FROM ${src};`;
+    // Large tables — narrow projection for speed and memory.
+    case 'stop_times.txt':
+      return `
+        CREATE OR REPLACE TABLE ${table} AS
+        SELECT stop_id, trip_id
+        FROM ${src};
+      `;
+    case 'shapes.txt':
+      return `
+        CREATE OR REPLACE TABLE ${table} AS
+        SELECT shape_id, shape_pt_lon, shape_pt_lat, shape_pt_sequence
+        FROM ${src};
+      `;
+    default:
+      return `CREATE OR REPLACE TABLE ${table} AS SELECT * FROM ${src};`;
   }
 }
 
@@ -135,6 +177,8 @@ async function transcodeTableToParquet(
   const stem = tableStem(name);
   const virtualPath = `${feedId}/${stem}.parquet`;
   try {
+    // Pre-register the output path so DuckDB doesn't log a "Buffering missing file" warning.
+    await db.registerEmptyFileBuffer(virtualPath);
     await conn.query(`
       COPY ${qualifiedTable(feedId, name)}
       TO '${virtualPath}'
@@ -149,8 +193,11 @@ async function transcodeTableToParquet(
   }
 }
 
-function stripBom(s: string): string {
-  return s.charCodeAt(0) === 0xfeff ? s.slice(1) : s;
+function stripUtf8Bom(bytes: Uint8Array): Uint8Array {
+  if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+    return bytes.subarray(3);
+  }
+  return bytes;
 }
 
 function deriveLabel(sourceName: string, feedStart?: string): string {

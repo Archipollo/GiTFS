@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import maplibregl, {
   Map as MapLibreMap,
   type ExpressionSpecification,
@@ -9,9 +9,21 @@ import { useAppStore } from '../state/app-store';
 import { fetchStops, fetchShapes, type StopPoint, type ShapePolyline } from '../gtfs/queries';
 import { MODES, MODE_COLOR, type Mode } from '../gtfs/modes';
 import MapOverlay from './MapOverlay';
+import { useRegistry } from '../registry/useRegistry';
+import { lookupStop } from '../registry/registry';
 
 const INITIAL_CENTER: [number, number] = [14.55, 47.6];
 const INITIAL_ZOOM = 6.5;
+
+const PRIMARY_COLOR_EXPR: ExpressionSpecification = [
+  'match',
+  ['get', 'primary_mode'],
+  'rail', MODE_COLOR.rail,
+  'metro', MODE_COLOR.metro,
+  'tram', MODE_COLOR.tram,
+  'bus', MODE_COLOR.bus,
+  MODE_COLOR.other,
+];
 
 const STYLE: maplibregl.StyleSpecification = {
   version: 8,
@@ -27,22 +39,18 @@ const STYLE: maplibregl.StyleSpecification = {
   layers: [{ id: 'osm', type: 'raster', source: 'osm' }],
 };
 
-// "match" expression: primary_mode -> color. Last arg is fallback.
-const PRIMARY_COLOR_EXPR: ExpressionSpecification = [
-  'match',
-  ['get', 'primary_mode'],
-  'rail', MODE_COLOR.rail,
-  'metro', MODE_COLOR.metro,
-  'tram', MODE_COLOR.tram,
-  'bus', MODE_COLOR.bus,
-  MODE_COLOR.other,
-];
+interface FeedRender {
+  stops: GeoJSON.FeatureCollection;
+  shapes: GeoJSON.FeatureCollection;
+  bounds: maplibregl.LngLatBoundsLike | null;
+}
 
 export default function MapView() {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
   const [ready, setReady] = useState(false);
   const activeFeedId = useAppStore((s) => s.activeFeedId);
+  const feedOrder = useAppStore((s) => s.feedOrder);
   const showStops = useAppStore((s) => s.showStops);
   const modeVisibility = useAppStore((s) => s.modeVisibility);
   const beginMapTask = useAppStore((s) => s.beginMapTask);
@@ -50,6 +58,43 @@ export default function MapView() {
   const activeFeedLabel = useAppStore((s) =>
     s.activeFeedId ? s.feeds[s.activeFeedId]?.label : null,
   );
+  const setInspectorSelection = useAppStore((s) => s.setInspectorSelection);
+  const registrySnapshot = useRegistry();
+  const registryFocus = useAppStore((s) => s.registryFocus);
+
+  // Prebuilt-GeoJSON cache keyed by feedId. Populated lazily on first view of
+  // a feed and proactively by the background prefetcher. Once a feed is here,
+  // switching to it costs one `setData` call — scrubbing the year slider is
+  // effectively instant.
+  const cacheRef = useRef<Map<string, FeedRender>>(new Map());
+  // In-flight fetch promises to dedupe concurrent requests for the same feed.
+  const pendingRef = useRef<Map<string, Promise<FeedRender>>>(new Map());
+  // Auto-fit the map once; subsequent feed switches must not jump the camera
+  // (scrubbing relies on a stable viewport to show differences).
+  const fittedRef = useRef(false);
+
+  const ensureFeedRender = useCallback(async (feedId: string): Promise<FeedRender> => {
+    const cached = cacheRef.current.get(feedId);
+    if (cached) return cached;
+    const pending = pendingRef.current.get(feedId);
+    if (pending) return pending;
+    const p = (async () => {
+      const [stops, shapes] = await Promise.all([
+        fetchStops(feedId),
+        fetchShapes(feedId),
+      ]);
+      const entry: FeedRender = {
+        stops: stopsToGeoJSON(stops),
+        shapes: shapesToGeoJSON(shapes),
+        bounds: stops.length > 0 ? boundsOfStops(stops) : null,
+      };
+      cacheRef.current.set(feedId, entry);
+      pendingRef.current.delete(feedId);
+      return entry;
+    })();
+    pendingRef.current.set(feedId, p);
+    return p;
+  }, []);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -63,6 +108,7 @@ export default function MapView() {
     map.on('load', () => {
       map.addSource('stops', { type: 'geojson', data: emptyFC() });
       map.addSource('shapes', { type: 'geojson', data: emptyFC() });
+      map.addSource('registry-focus', { type: 'geojson', data: emptyFC() });
       map.addLayer({
         id: 'shapes-line',
         type: 'line',
@@ -85,6 +131,62 @@ export default function MapView() {
           'circle-opacity': 0.9,
         },
       });
+      map.addLayer({
+        id: 'registry-focus-halo',
+        type: 'circle',
+        source: 'registry-focus',
+        paint: {
+          'circle-radius': ['interpolate', ['linear'], ['zoom'], 8, 10, 14, 26],
+          'circle-color': '#ffffff',
+          'circle-opacity': 0,
+          'circle-stroke-color': '#fbbf24',
+          'circle-stroke-width': 3,
+        },
+      });
+
+      map.on('mouseenter', 'stops-circle', () => {
+        map.getCanvas().style.cursor = 'pointer';
+      });
+      map.on('mouseleave', 'stops-circle', () => {
+        map.getCanvas().style.cursor = '';
+      });
+      map.on('click', 'stops-circle', (evt) => {
+        const feature = evt.features?.[0];
+        if (!feature) return;
+        const props = feature.properties ?? {};
+        const activeId = useAppStore.getState().activeFeedId;
+        const rawId = String(props.stop_id ?? '');
+        const canonical = activeId ? lookupStop(activeId, rawId)?.canonicalId ?? null : null;
+        setInspectorSelection({
+          kind: 'stop',
+          stopId: rawId,
+          stopName: String(props.stop_name ?? ''),
+          modes: modesFromProps(props),
+          canonicalId: canonical,
+        });
+      });
+
+      map.on('mouseenter', 'shapes-line', () => {
+        map.getCanvas().style.cursor = 'pointer';
+      });
+      map.on('mouseleave', 'shapes-line', () => {
+        map.getCanvas().style.cursor = '';
+      });
+      map.on('click', 'shapes-line', (evt) => {
+        const feature = evt.features?.[0];
+        if (!feature) return;
+        const props = feature.properties ?? {};
+        setInspectorSelection({
+          kind: 'line',
+          shapeId: String(props.shape_id ?? ''),
+          modes: modesFromProps(props),
+        });
+      });
+
+      map.on('click', (evt) => {
+        const hit = map.queryRenderedFeatures(evt.point, { layers: ['stops-circle', 'shapes-line'] });
+        if (hit.length === 0) setInspectorSelection(null);
+      });
       setReady(true);
     });
     mapRef.current = map;
@@ -92,43 +194,83 @@ export default function MapView() {
       map.remove();
       mapRef.current = null;
     };
-  }, []);
+  }, [setInspectorSelection]);
 
-  // Reload data when active feed changes.
+  // Swap visible feed. Cache hit = instant setData, no spinner, no camera move.
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready) return;
     if (!activeFeedId) {
       setSource(map, 'stops', emptyFC());
       setSource(map, 'shapes', emptyFC());
+      setInspectorSelection(null);
       return;
     }
+
     let cancelled = false;
+    const apply = (entry: FeedRender) => {
+      if (cancelled) return;
+      setSource(map, 'stops', entry.stops);
+      setSource(map, 'shapes', entry.shapes);
+      if (!fittedRef.current && entry.bounds) {
+        map.fitBounds(entry.bounds, { padding: 40, duration: 600, maxZoom: 12 });
+        fittedRef.current = true;
+      }
+    };
+
+    const cached = cacheRef.current.get(activeFeedId);
+    if (cached) {
+      apply(cached);
+      return () => {
+        cancelled = true;
+      };
+    }
+
     const taskId = `render-${activeFeedId}`;
     beginMapTask(taskId, `Rendering ${activeFeedLabel ?? activeFeedId}…`);
-    (async () => {
-      try {
-        const [stops, shapes] = await Promise.all([
-          fetchStops(activeFeedId),
-          fetchShapes(activeFeedId),
-        ]);
-        if (cancelled) return;
-        setSource(map, 'stops', stopsToGeoJSON(stops));
-        setSource(map, 'shapes', shapesToGeoJSON(shapes));
-        if (stops.length > 0) {
-          map.fitBounds(boundsOfStops(stops), { padding: 40, duration: 600, maxZoom: 12 });
-        }
-      } catch (err) {
-        console.error('map render failed', err);
-      } finally {
-        endMapTask(taskId);
-      }
-    })();
+    ensureFeedRender(activeFeedId)
+      .then(apply)
+      .catch((err) => console.error('map render failed', err))
+      .finally(() => endMapTask(taskId));
+
     return () => {
       cancelled = true;
       endMapTask(taskId);
     };
-  }, [activeFeedId, ready, activeFeedLabel, beginMapTask, endMapTask]);
+  }, [activeFeedId, ready, activeFeedLabel, beginMapTask, endMapTask, ensureFeedRender, setInspectorSelection]);
+
+  // Prebuild GeoJSON for every loaded feed once the map is up, so scrubbing
+  // the year slider never blocks on DuckDB. The active feed always wins the
+  // race because the effect above runs first; this only fills in the rest.
+  useEffect(() => {
+    if (!ready) return;
+    let cancelled = false;
+    const ids = feedOrder.filter((id) => !cacheRef.current.has(id));
+    (async () => {
+      for (const id of ids) {
+        if (cancelled) return;
+        try {
+          await ensureFeedRender(id);
+        } catch (err) {
+          console.warn('map prefetch failed', id, err);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [ready, feedOrder, ensureFeedRender]);
+
+  // Drop cache entries for feeds the user has removed.
+  useEffect(() => {
+    const valid = new Set(feedOrder);
+    for (const key of [...cacheRef.current.keys()]) {
+      if (!valid.has(key)) cacheRef.current.delete(key);
+    }
+    for (const key of [...pendingRef.current.keys()]) {
+      if (!valid.has(key)) pendingRef.current.delete(key);
+    }
+  }, [feedOrder]);
 
   // Reapply filters when toggles change.
   useEffect(() => {
@@ -142,6 +284,35 @@ export default function MapView() {
     map.setFilter('stops-circle', modeFilter);
     map.setFilter('shapes-line', modeFilter);
   }, [showStops, modeVisibility, ready]);
+
+  // Drive the canonical-entity focus halo.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    if (!registryFocus) {
+      setSource(map, 'registry-focus', emptyFC());
+      return;
+    }
+    let lat = registryFocus.lat;
+    let lon = registryFocus.lon;
+    if ((lat == null || lon == null) && registrySnapshot && registryFocus.kind === 'stop') {
+      const canon = registrySnapshot.stops[registryFocus.canonicalId];
+      if (canon) { lat = canon.lat; lon = canon.lon; }
+    }
+    if (lat == null || lon == null) {
+      setSource(map, 'registry-focus', emptyFC());
+      return;
+    }
+    setSource(map, 'registry-focus', {
+      type: 'FeatureCollection',
+      features: [{
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates: [lon, lat] },
+        properties: { canonicalId: registryFocus.canonicalId },
+      }],
+    });
+    map.flyTo({ center: [lon, lat], zoom: Math.max(map.getZoom(), 13), duration: 700 });
+  }, [registryFocus, ready, registrySnapshot]);
 
   return (
     <>
@@ -182,6 +353,13 @@ function modeFlags(modes: Mode[]): Record<string, boolean> {
   const flags: Record<string, boolean> = {};
   for (const m of MODES) flags[`is_${m}`] = effective.includes(m);
   return flags;
+}
+
+function modesFromProps(props: Record<string, unknown>): Mode[] {
+  return MODES.filter((m) => {
+    const v = props[`is_${m}`];
+    return v === true || v === 'true' || v === 1 || v === '1';
+  });
 }
 
 function stopsToGeoJSON(stops: StopPoint[]): GeoJSON.FeatureCollection {
