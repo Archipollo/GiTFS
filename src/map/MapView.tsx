@@ -10,7 +10,7 @@ import { fetchStops, fetchShapes, type StopPoint, type ShapePolyline } from '../
 import { MODES, MODE_COLOR, type Mode } from '../gtfs/modes';
 import MapOverlay from './MapOverlay';
 import { useRegistry } from '../registry/useRegistry';
-import { lookupStop } from '../registry/registry';
+import { lookupStop, lookupRoute } from '../registry/registry';
 import { useDiff } from '../diff/useDiff';
 import {
   DIFF_COLOR,
@@ -18,6 +18,7 @@ import {
   diffStopGhosts,
   diffStopPoints,
 } from '../diff/geojson';
+import { getRoutesForShape } from '../inspector/data';
 
 const INITIAL_CENTER: [number, number] = [14.55, 47.6];
 const INITIAL_ZOOM = 6.5;
@@ -76,7 +77,9 @@ export default function MapView() {
   const activeFeedLabel = useAppStore((s) =>
     s.activeFeedId ? s.feeds[s.activeFeedId]?.label : null,
   );
-  const setInspectorSelection = useAppStore((s) => s.setInspectorSelection);
+  const setInspectorStop = useAppStore((s) => s.setInspectorStop);
+  const setInspectorRoute = useAppStore((s) => s.setInspectorRoute);
+  const clearInspector = useAppStore((s) => s.clearInspector);
   const registrySnapshot = useRegistry();
   const registryFocus = useAppStore((s) => s.registryFocus);
 
@@ -84,7 +87,7 @@ export default function MapView() {
   const appMode = useAppStore((s) => s.mode);
   const compareFeedId = useAppStore((s) => s.compareFeedId);
   const diffStopVisibility = useAppStore((s) => s.diffStopVisibility);
-  const diffFocus = useAppStore((s) => s.diffFocus);
+  const diffStopFocus = useAppStore((s) => s.diffStopFocus);
   const diffStatus = useDiff(
     appMode === 'diff' ? activeFeedId : null,
     appMode === 'diff' ? compareFeedId : null,
@@ -229,8 +232,7 @@ export default function MapView() {
         if (!f) return;
         const canonicalId = String(f.properties?.canonicalId ?? '');
         if (!canonicalId) return;
-        useAppStore.getState().setDiffFocus({ kind: 'stop', canonicalId });
-        setInspectorSelection(null);
+        useAppStore.getState().setDiffStopFocus(canonicalId);
       });
 
       map.on('mouseenter', 'stops-circle', () => {
@@ -244,11 +246,12 @@ export default function MapView() {
         if (!feature) return;
         const props = feature.properties ?? {};
         const activeId = useAppStore.getState().activeFeedId;
+        if (!activeId) return;
         const rawId = String(props.stop_id ?? '');
-        const canonical = activeId ? lookupStop(activeId, rawId)?.canonicalId ?? null : null;
-        setInspectorSelection({
-          kind: 'stop',
-          stopId: rawId,
+        const canonical = lookupStop(activeId, rawId)?.canonicalId ?? null;
+        setInspectorStop({
+          feedId: activeId,
+          rawId,
           stopName: String(props.stop_name ?? ''),
           modes: modesFromProps(props),
           canonicalId: canonical,
@@ -265,16 +268,40 @@ export default function MapView() {
         const feature = evt.features?.[0];
         if (!feature) return;
         const props = feature.properties ?? {};
-        setInspectorSelection({
-          kind: 'line',
-          shapeId: String(props.shape_id ?? ''),
-          modes: modesFromProps(props),
-        });
+        const shapeId = String(props.shape_id ?? '');
+        const activeId = useAppStore.getState().activeFeedId;
+        if (!activeId || !shapeId) return;
+        // Resolve shape → route_id async (cached). The inspector will stay
+        // showing its previous selection until this resolves — which is
+        // effectively instant after the first click on any shape per feed.
+        getRoutesForShape(activeId, shapeId)
+          .then((routeIds) => {
+            if (routeIds.length === 0) return;
+            const routeId = routeIds[0];
+            const canonical = lookupRoute(activeId, routeId)?.canonicalId ?? null;
+            const appMode = useAppStore.getState().mode;
+            if (appMode === 'diff' && canonical) {
+              useAppStore.getState().setDiffRouteFocus(canonical);
+            } else {
+              setInspectorRoute({
+                feedId: activeId,
+                rawId: routeId,
+                shapeId,
+                canonicalId: canonical,
+              });
+            }
+          })
+          .catch((err) => console.warn('shape→route resolve failed', err));
       });
 
       map.on('click', (evt) => {
-        const hit = map.queryRenderedFeatures(evt.point, { layers: ['stops-circle', 'shapes-line'] });
-        if (hit.length === 0) setInspectorSelection(null);
+        const hit = map.queryRenderedFeatures(evt.point, {
+          layers: ['stops-circle', 'shapes-line', 'diff-stops-circle'],
+        });
+        if (hit.length === 0) {
+          clearInspector();
+          useAppStore.getState().clearDiffFocus();
+        }
       });
       setReady(true);
     });
@@ -283,7 +310,7 @@ export default function MapView() {
       map.remove();
       mapRef.current = null;
     };
-  }, [setInspectorSelection]);
+  }, [setInspectorStop, setInspectorRoute, clearInspector]);
 
   // Swap visible feed. Cache hit = instant setData, no spinner, no camera move.
   useEffect(() => {
@@ -292,7 +319,7 @@ export default function MapView() {
     if (!activeFeedId) {
       setSource(map, 'stops', emptyFC());
       setSource(map, 'shapes', emptyFC());
-      setInspectorSelection(null);
+      clearInspector();
       return;
     }
 
@@ -326,7 +353,7 @@ export default function MapView() {
       cancelled = true;
       endMapTask(taskId);
     };
-  }, [activeFeedId, ready, activeFeedLabel, beginMapTask, endMapTask, ensureFeedRender, setInspectorSelection]);
+  }, [activeFeedId, ready, activeFeedLabel, beginMapTask, endMapTask, ensureFeedRender, clearInspector]);
 
   // Prebuild GeoJSON for every loaded feed once the map is up, so scrubbing
   // the year slider never blocks on DuckDB. The active feed always wins the
@@ -441,12 +468,14 @@ export default function MapView() {
     map.setLayoutProperty('diff-arrow-line', 'visibility', diffVis.visibility!);
   }, [appMode, diffActive, ready, showStops]);
 
-  // Fly to the focused diff entry.
+  // Fly to the focused diff stop. Route focus is handled by the inspector
+  // panel itself — we don't zoom on line picks because routes rarely fit
+  // inside a single map tile.
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready) return;
-    if (!diffFocus || diffStatus.kind !== 'ready') return;
-    const entry = diffStatus.result.stops.find((e) => e.canonicalId === diffFocus.canonicalId);
+    if (!diffStopFocus || diffStatus.kind !== 'ready') return;
+    const entry = diffStatus.result.stops.find((e) => e.canonicalId === diffStopFocus);
     if (!entry) return;
     const coord = entry.b
       ? [entry.b.lon, entry.b.lat]
@@ -458,7 +487,7 @@ export default function MapView() {
       zoom: Math.max(map.getZoom(), 14),
       duration: 600,
     });
-  }, [diffFocus, diffStatus, ready]);
+  }, [diffStopFocus, diffStatus, ready]);
 
   return (
     <>

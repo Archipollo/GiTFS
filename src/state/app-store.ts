@@ -17,9 +17,26 @@ export interface FeedMeta {
   feedEndDate?: string;
 }
 
-export type InspectorSelection =
-  | { kind: 'stop'; stopId: string; stopName: string; modes: Mode[]; canonicalId?: string | null }
-  | { kind: 'line'; shapeId: string; modes: Mode[] };
+/** Timeline-mode stop slot: identifies a raw stop in the active feed. */
+export interface StopInspectorRef {
+  feedId: string;
+  rawId: string;
+  stopName: string;
+  modes: Mode[];
+  canonicalId?: string | null;
+}
+
+/**
+ * Timeline-mode route slot. Identified by raw route_id within a feed. The
+ * optional `shapeId` is the shape the user clicked (if any) so the map can
+ * draw the matching polyline overlay.
+ */
+export interface RouteInspectorRef {
+  feedId: string;
+  rawId: string;
+  shapeId?: string | null;
+  canonicalId?: string | null;
+}
 
 export interface RegistryFocus {
   kind: 'stop' | 'route';
@@ -56,8 +73,18 @@ export interface AppState {
   removeFeed: (id: string) => void;
   setActiveFeed: (id: string | null) => void;
   setCompareFeed: (id: string | null) => void;
-  inspectorSelection: InspectorSelection | null;
-  setInspectorSelection: (selection: InspectorSelection | null) => void;
+
+  /**
+   * The inspector has two independent slots (stop + route) so the user can
+   * see a station's detail *and* the currently selected line that serves
+   * it side-by-side, matching the classic "click a stop → click one of its
+   * lines" interaction.
+   */
+  inspectorStop: StopInspectorRef | null;
+  inspectorRoute: RouteInspectorRef | null;
+  setInspectorStop: (ref: StopInspectorRef | null) => void;
+  setInspectorRoute: (ref: RouteInspectorRef | null) => void;
+  clearInspector: () => void;
 
   drawerOpen: boolean;
   toggleDrawer: () => void;
@@ -106,15 +133,19 @@ export interface AppState {
   diffRouteVisibility: Record<RouteStatus, boolean>;
   toggleDiffRouteVisibility: (s: RouteStatus) => void;
   /**
-   * A canonical diff entry the user has focused from a list. The map should
-   * fly to its representative coordinate and the inspector should show its
-   * A/B details.
+   * Diff-mode inspector focus. Two independent canonical slots (stop + route)
+   * mirror the timeline-mode `inspectorStop` / `inspectorRoute` pair so the
+   * inspector can show "removed stop X + the line it used to serve on feed A"
+   * simultaneously.
+   *
+   * Route focus may be a renumbered-pair synthetic id (`ren__fromCid__toCid`);
+   * consumers that need the underlying route(s) should decode by splitting.
    */
-  diffFocus:
-    | { kind: 'stop'; canonicalId: string }
-    | { kind: 'route'; canonicalId: string }
-    | null;
-  setDiffFocus: (f: AppState['diffFocus']) => void;
+  diffStopFocus: string | null;
+  diffRouteFocus: string | null;
+  setDiffStopFocus: (canonicalId: string | null) => void;
+  setDiffRouteFocus: (canonicalId: string | null) => void;
+  clearDiffFocus: () => void;
 }
 
 export function selectMapBusy(s: AppState): boolean {
@@ -139,13 +170,14 @@ export const useAppStore = create<AppState>((set) => ({
   mode: 'timeline',
   setMode: (mode) =>
     set((s) => {
-      if (mode !== 'diff') return { mode, diffFocus: null };
-      if (s.feedOrder.length < 2) return { mode, compareFeedId: null, diffFocus: null };
+      const cleared = { diffStopFocus: null, diffRouteFocus: null } as const;
+      if (mode !== 'diff') return { mode, ...cleared };
+      if (s.feedOrder.length < 2) return { mode, compareFeedId: null, ...cleared };
       if (s.compareFeedId && s.compareFeedId !== s.activeFeedId) {
-        return { mode, diffFocus: null };
+        return { mode, ...cleared };
       }
       const fallback = s.feedOrder.find((id) => id !== s.activeFeedId) ?? null;
-      return { mode, compareFeedId: fallback, diffFocus: null };
+      return { mode, compareFeedId: fallback, ...cleared };
     }),
 
   feeds: {},
@@ -176,14 +208,18 @@ export const useAppStore = create<AppState>((set) => ({
     set((s) => ({
       activeFeedId: id,
       compareFeedId: id !== null && s.compareFeedId === id ? null : s.compareFeedId,
-      inspectorSelection: null,
+      inspectorStop: null,
+      inspectorRoute: null,
     })),
   setCompareFeed: (id) =>
     set((s) => ({
       compareFeedId: id === s.activeFeedId ? null : id,
     })),
-  inspectorSelection: null,
-  setInspectorSelection: (selection) => set({ inspectorSelection: selection }),
+  inspectorStop: null,
+  inspectorRoute: null,
+  setInspectorStop: (inspectorStop) => set({ inspectorStop }),
+  setInspectorRoute: (inspectorRoute) => set({ inspectorRoute }),
+  clearInspector: () => set({ inspectorStop: null, inspectorRoute: null }),
 
   drawerOpen: false,
   toggleDrawer: () => set((s) => ({ drawerOpen: !s.drawerOpen })),
@@ -249,6 +285,9 @@ export const useAppStore = create<AppState>((set) => ({
     set((st) => ({
       diffRouteVisibility: { ...st.diffRouteVisibility, [s]: !st.diffRouteVisibility[s] },
     })),
-  diffFocus: null,
-  setDiffFocus: (diffFocus) => set({ diffFocus }),
+  diffStopFocus: null,
+  diffRouteFocus: null,
+  setDiffStopFocus: (diffStopFocus) => set({ diffStopFocus }),
+  setDiffRouteFocus: (diffRouteFocus) => set({ diffRouteFocus }),
+  clearDiffFocus: () => set({ diffStopFocus: null, diffRouteFocus: null }),
 }));

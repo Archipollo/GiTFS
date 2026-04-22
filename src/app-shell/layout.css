@@ -807,3 +807,323 @@
 @keyframes spinner-rotate {
   to { transform: rotate(360deg); }
 }
+
+/* Inspector cards (Stop / Line) ---------------------------------------- */
+
+.inspector-card {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.12);
+  padding: 10px;
+  margin-bottom: 12px;
+}
+.inspector-card:last-child { margin-bottom: 0; }
+
+.inspector-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.inspector-card-kind {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--fg-dim);
+  font-weight: 600;
+}
+.inspector-card-close {
+  margin-left: auto;
+  padding: 0 6px;
+  font-size: 14px;
+  line-height: 1;
+  background: transparent;
+  border: none;
+  color: var(--fg-dim);
+  cursor: pointer;
+  border-radius: 3px;
+}
+.inspector-card-close:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--fg);
+}
+.inspector-card-title {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.2;
+  margin-top: 2px;
+  word-break: break-word;
+}
+.inspector-card-sub {
+  font-size: 11px;
+  margin-top: 2px;
+  word-break: break-all;
+}
+.inspector-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+.inspector-dot-sep {
+  color: var(--fg-dim);
+  opacity: 0.7;
+}
+
+.inspector-canonical {
+  margin-top: 10px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: rgba(79, 195, 247, 0.04);
+}
+.inspector-canonical-label {
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  font-size: 10px;
+}
+.inspector-canonical-id {
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  margin-top: 2px;
+  word-break: break-all;
+  color: var(--fg);
+}
+.inspector-canonical-sub {
+  font-size: 11px;
+  margin-top: 2px;
+}
+.inspector-canonical-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+  flex-wrap: wrap;
+}
+.inspector-canonical-actions button {
+  padding: 3px 8px;
+  font-size: 11px;
+}
+
+.inspector-section {
+  margin-top: 12px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+.inspector-section-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--fg-dim);
+  margin-bottom: 6px;
+  font-weight: 600;
+}
+.inspector-section-count {
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+  padding: 1px 8px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+.inspector-section-body {
+  max-height: 260px;
+  overflow-y: auto;
+}
+.inspector-placeholder {
+  padding: 8px 4px;
+  font-size: 12px;
+}
+
+/* Line pills (lines serving a stop) */
+.line-pill-list,
+.stop-pill-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.line-pill {
+  display: grid;
+  grid-template-columns: 12px auto 1fr auto auto;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+  font-size: 12px;
+  transition: background 0.1s ease;
+}
+.line-pill:hover {
+  background: rgba(79, 195, 247, 0.08);
+  border-color: rgba(79, 195, 247, 0.35);
+}
+.line-pill.selected {
+  background: rgba(79, 195, 247, 0.14);
+  border-color: var(--accent);
+}
+.line-pill-short {
+  font-weight: 700;
+  font-size: 13px;
+  min-width: 26px;
+  font-variant-numeric: tabular-nums;
+}
+.line-pill-long {
+  color: var(--fg-dim);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.line-pill-n {
+  font-size: 11px;
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 8px;
+  padding: 0 6px;
+}
+
+/* Per-diff-status tint — subtle, additive to the base pill. */
+.line-pill--added,
+.stop-pill--added {
+  border-left: 3px solid var(--added);
+}
+.line-pill--removed,
+.stop-pill--removed {
+  border-left: 3px solid var(--removed);
+}
+.line-pill--modified,
+.line-pill--renumbered,
+.line-pill--moved,
+.line-pill--renamed,
+.stop-pill--modified,
+.stop-pill--renumbered,
+.stop-pill--moved,
+.stop-pill--renamed {
+  border-left: 3px solid var(--modified);
+}
+.line-pill--unchanged,
+.stop-pill--unchanged {
+  opacity: 0.75;
+}
+
+.line-status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1px solid rgba(0, 0, 0, 0.4);
+}
+
+.stop-pill {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+  font-size: 12px;
+  transition: background 0.1s ease;
+}
+.stop-pill:hover {
+  background: rgba(79, 195, 247, 0.08);
+  border-color: rgba(79, 195, 247, 0.35);
+}
+.stop-pill.selected {
+  background: rgba(79, 195, 247, 0.14);
+  border-color: var(--accent);
+}
+.stop-pill-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Sequence-numbered variant: used in the "Stops along this line" list so
+   riders can see the stop's real position along the route. */
+.stop-pill--seq {
+  grid-template-columns: 24px 1fr auto auto;
+}
+.stop-pill-seq {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 20px;
+  padding: 0 4px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  font-size: 11px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+  color: var(--fg-dim);
+}
+.stop-pill.selected .stop-pill-seq {
+  background: rgba(79, 195, 247, 0.24);
+  color: var(--accent);
+}
+.stop-pill-id {
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--fg-dim);
+  background: rgba(255, 255, 255, 0.04);
+  padding: 1px 5px;
+  border-radius: 3px;
+  max-width: 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Direction ("course") pager shown above the stops list. */
+.route-course {
+  margin-bottom: 8px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: rgba(79, 195, 247, 0.04);
+}
+.route-course-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+.route-course-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+.route-course-headsign {
+  font-size: 13px;
+  font-weight: 600;
+  margin-top: 2px;
+  color: var(--fg);
+  word-break: break-word;
+}
+.route-course-trips {
+  font-size: 11px;
+  margin-top: 2px;
+}
+.route-course-toggle {
+  padding: 4px 10px;
+  font-size: 11px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}

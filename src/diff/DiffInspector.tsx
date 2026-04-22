@@ -1,25 +1,40 @@
 // Right-panel inspector for diff mode.
 //
-// Shows the currently-focused canonical stop (or route) side-by-side for A
-// and B, with changed fields highlighted. Focus is driven by either a
-// map-click (setDiffFocus) or by selecting a row in the drawer's changelog.
+// Mirrors the timeline inspector but uses canonical ids (shared across A and
+// B) as the selection unit:
+//
+//   - `diffStopFocus` — the canonical stop whose A/B details are shown in
+//     the top card, along with a unified list of lines that served it on
+//     either side (each line tagged with its own diff status).
+//   - `diffRouteFocus` — the canonical route whose A/B details are shown in
+//     the bottom card, along with a unified list of stops it called at on
+//     either side (each stop tagged with its own diff status).
+//
+// Clicking a line chip in the stop card sets the route focus; clicking a
+// stop chip in the route card sets the stop focus. This lets the user walk
+// the network even when entities exist on only one side (e.g. inspect a
+// "removed" stop and see which lines used to serve it).
 
+import { useEffect, useState } from 'react';
 import { useAppStore } from '../state/app-store';
 import { useDiff } from './useDiff';
 import type { DiffResult, StopDiffEntry, RouteDiffEntry, StopSide, RouteSide } from './engine';
 import { DIFF_COLOR } from './geojson';
+import { InspectorSection, LinePill, StopPill, ModeSwatch } from '../inspector/components';
+import { MODE_LABEL } from '../gtfs/modes';
+import { useDiffLinesForStop, useDiffStopsForRoute, type DiffRouteDirection, type DiffStopRow } from '../inspector/diff-data';
 
 export default function DiffInspector() {
   const activeFeedId = useAppStore((s) => s.activeFeedId);
   const compareFeedId = useAppStore((s) => s.compareFeedId);
-  const diffFocus = useAppStore((s) => s.diffFocus);
+  const diffStopFocus = useAppStore((s) => s.diffStopFocus);
+  const diffRouteFocus = useAppStore((s) => s.diffRouteFocus);
   const feedALabel = useAppStore((s) =>
     activeFeedId ? s.feeds[activeFeedId]?.label ?? activeFeedId : null,
   );
   const feedBLabel = useAppStore((s) =>
     compareFeedId ? s.feeds[compareFeedId]?.label ?? compareFeedId : null,
   );
-  const setDiffFocus = useAppStore((s) => s.setDiffFocus);
 
   const diff = useDiff(activeFeedId, compareFeedId);
 
@@ -64,66 +79,49 @@ export default function DiffInspector() {
   }
 
   const result = diff.result;
+  const stopEntry = diffStopFocus
+    ? result.stops.find((e) => e.canonicalId === diffStopFocus) ?? null
+    : null;
+  const routeEntry = diffRouteFocus
+    ? result.routes.find((e) => e.canonicalId === diffRouteFocus) ?? null
+    : null;
 
-  if (!diffFocus) {
-    return (
-      <div>
-        <h3>Inspector</h3>
-        <DiffTotals result={result} />
-        <p className="muted">
-          Click a colored dot on the map (or a row in the Changelog drawer)
-          to inspect that change.
-        </p>
-      </div>
-    );
-  }
+  const hasAny = Boolean(stopEntry || routeEntry);
 
-  if (diffFocus.kind === 'stop') {
-    const entry = result.stops.find((e) => e.canonicalId === diffFocus.canonicalId);
-    if (!entry) {
-      return (
-        <div>
-          <h3>Inspector</h3>
-          <p className="muted">Focused stop not found in current diff.</p>
-          <button onClick={() => setDiffFocus(null)}>Clear focus</button>
-        </div>
-      );
-    }
-    return (
-      <div>
-        <h3>Inspector</h3>
-        <StopInspector entry={entry} aLabel={feedALabel} bLabel={feedBLabel} />
-        <button
-          style={{ marginTop: 10, padding: '4px 8px', fontSize: 11 }}
-          onClick={() => setDiffFocus(null)}
-        >
-          Clear focus
-        </button>
-      </div>
-    );
-  }
-
-  // Route focus
-  const entry = result.routes.find((e) => e.canonicalId === diffFocus.canonicalId);
-  if (!entry) {
-    return (
-      <div>
-        <h3>Inspector</h3>
-        <p className="muted">Focused route not found in current diff.</p>
-        <button onClick={() => setDiffFocus(null)}>Clear focus</button>
-      </div>
-    );
-  }
   return (
     <div>
       <h3>Inspector</h3>
-      <RouteInspector entry={entry} aLabel={feedALabel} bLabel={feedBLabel} />
-      <button
-        style={{ marginTop: 10, padding: '4px 8px', fontSize: 11 }}
-        onClick={() => setDiffFocus(null)}
-      >
-        Clear focus
-      </button>
+      {!hasAny && <DiffTotals result={result} />}
+
+      {stopEntry && (
+        <DiffStopCard
+          entry={stopEntry}
+          result={result}
+          feedA={activeFeedId}
+          feedB={compareFeedId}
+          aLabel={feedALabel}
+          bLabel={feedBLabel}
+        />
+      )}
+
+      {routeEntry && (
+        <DiffRouteCard
+          entry={routeEntry}
+          result={result}
+          feedA={activeFeedId}
+          feedB={compareFeedId}
+          aLabel={feedALabel}
+          bLabel={feedBLabel}
+        />
+      )}
+
+      {!hasAny && (
+        <p className="muted" style={{ marginTop: 10 }}>
+          Click a colored dot on the map (or a row in the Changelog drawer)
+          to inspect that change. From a stop you can walk to any of its
+          lines — even ones that were added or removed.
+        </p>
+      )}
     </div>
   );
 }
@@ -153,26 +151,51 @@ function DiffTotals({ result }: { result: DiffResult }) {
   );
 }
 
-// ---- stop side panel -------------------------------------------------------
+// ---- stop card -------------------------------------------------------------
 
-function StopInspector({
+function DiffStopCard({
   entry,
+  result,
+  feedA,
+  feedB,
   aLabel,
   bLabel,
 }: {
   entry: StopDiffEntry;
+  result: DiffResult;
+  feedA: string | null;
+  feedB: string | null;
   aLabel: string | null;
   bLabel: string | null;
 }) {
-  const { status, a, b } = entry;
-  const nameChanged = !!a && !!b && a.name.trim() !== b.name.trim();
+  const setDiffStopFocus = useAppStore((s) => s.setDiffStopFocus);
+  const setDiffRouteFocus = useAppStore((s) => s.setDiffRouteFocus);
+  const diffRouteFocus = useAppStore((s) => s.diffRouteFocus);
+
+  const linesState = useDiffLinesForStop(entry.canonicalId, feedA, feedB, result);
+  const lines = linesState.status === 'ready' ? linesState.value : [];
+
+  const nameChanged = !!entry.a && !!entry.b && entry.a.name.trim() !== entry.b.name.trim();
+
   return (
-    <div>
-      <StatusBadge status={status} />
-      <div style={{ fontWeight: 600, marginTop: 4 }}>
+    <div className="inspector-card">
+      <div className="inspector-card-head">
+        <div className="inspector-card-kind">Stop</div>
+        <StatusBadge status={entry.status} />
+        <button
+          type="button"
+          className="inspector-card-close"
+          onClick={() => setDiffStopFocus(null)}
+          title="Clear stop focus"
+          aria-label="Clear stop focus"
+        >
+          ×
+        </button>
+      </div>
+      <div className="inspector-card-title">
         {entry.canonical.name || '(unnamed)'}
       </div>
-      <div className="muted" style={{ fontFamily: 'ui-monospace, monospace', fontSize: 11 }}>
+      <div className="muted inspector-card-sub" style={{ fontFamily: 'ui-monospace, monospace' }}>
         {entry.canonicalId}
       </div>
       {entry.moved && (
@@ -180,24 +203,71 @@ function StopInspector({
           Moved {entry.distM.toFixed(0)} m
         </div>
       )}
+
       <div className="diff-ab">
         <div className="diff-ab-col">
           <div className="diff-ab-head diff-ab-head--a">A · {aLabel ?? '—'}</div>
-          {a ? (
-            <StopSideTable side={a} name={a.name} highlight={{ name: nameChanged, pos: entry.moved }} />
+          {entry.a ? (
+            <StopSideTable
+              side={entry.a}
+              name={entry.a.name}
+              highlight={{ name: nameChanged, pos: entry.moved }}
+            />
           ) : (
             <div className="diff-ab-absent">not present</div>
           )}
         </div>
         <div className="diff-ab-col">
           <div className="diff-ab-head diff-ab-head--b">B · {bLabel ?? '—'}</div>
-          {b ? (
-            <StopSideTable side={b} name={b.name} highlight={{ name: nameChanged, pos: entry.moved }} />
+          {entry.b ? (
+            <StopSideTable
+              side={entry.b}
+              name={entry.b.name}
+              highlight={{ name: nameChanged, pos: entry.moved }}
+            />
           ) : (
             <div className="diff-ab-absent">not present</div>
           )}
         </div>
       </div>
+
+      <InspectorSection
+        title="Lines"
+        count={linesState.status === 'ready' ? lines.length : undefined}
+      >
+        {linesState.status === 'loading' && (
+          <div className="muted inspector-placeholder">Loading lines…</div>
+        )}
+        {linesState.status === 'error' && (
+          <div className="muted inspector-placeholder" style={{ color: 'var(--removed)' }}>
+            Failed to load lines: {linesState.message}
+          </div>
+        )}
+        {linesState.status === 'ready' && lines.length === 0 && (
+          <div className="muted inspector-placeholder">
+            No lines serve this stop on either side.
+          </div>
+        )}
+        {linesState.status === 'ready' && lines.length > 0 && (
+          <div className="line-pill-list">
+            {lines.map((l) => (
+              <LinePill
+                key={l.canonicalId}
+                line={{
+                  route_short_name: l.shortName,
+                  route_long_name: l.longName,
+                  agency_name: l.agency,
+                  mode: l.mode,
+                  trip_count: Math.max(l.aTripCount, l.bTripCount),
+                }}
+                status={l.status}
+                selected={l.canonicalId === diffRouteFocus}
+                onClick={() => setDiffRouteFocus(l.canonicalId)}
+              />
+            ))}
+          </div>
+        )}
+      </InspectorSection>
     </div>
   );
 }
@@ -237,39 +307,78 @@ function StopSideTable({
   );
 }
 
-// ---- route side panel ------------------------------------------------------
+// ---- route card ------------------------------------------------------------
 
-function RouteInspector({
+function DiffRouteCard({
   entry,
+  result,
+  feedA,
+  feedB,
   aLabel,
   bLabel,
 }: {
   entry: RouteDiffEntry;
+  result: DiffResult;
+  feedA: string | null;
+  feedB: string | null;
   aLabel: string | null;
   bLabel: string | null;
 }) {
-  const { a, b } = entry;
+  const setDiffRouteFocus = useAppStore((s) => s.setDiffRouteFocus);
+  const setDiffStopFocus = useAppStore((s) => s.setDiffStopFocus);
+  const diffStopFocus = useAppStore((s) => s.diffStopFocus);
+
+  const stopsState = useDiffStopsForRoute(entry.canonicalId, feedA, feedB, result);
+  const directions = stopsState.status === 'ready' ? stopsState.directions : [];
+
+  const [courseIdx, setCourseIdx] = useState(0);
+  useEffect(() => {
+    setCourseIdx(0);
+  }, [entry.canonicalId]);
+  const course = directions.length > 0
+    ? directions[Math.min(courseIdx, directions.length - 1)]
+    : null;
+
+  const a = entry.a;
+  const b = entry.b;
   const highlight = {
     short: !!a && !!b && a.shortName !== b.shortName,
     long: !!a && !!b && a.longName !== b.longName,
     agency: !!a && !!b && a.agencyName !== b.agencyName,
     mode: !!a && !!b && a.mode !== b.mode,
   };
+
   return (
-    <div>
-      <StatusBadge status={entry.status} />
-      <div style={{ fontWeight: 600, marginTop: 4 }}>
+    <div className="inspector-card">
+      <div className="inspector-card-head">
+        <div className="inspector-card-kind">Line</div>
+        <StatusBadge status={entry.status} />
+        <button
+          type="button"
+          className="inspector-card-close"
+          onClick={() => setDiffRouteFocus(null)}
+          title="Clear line focus"
+          aria-label="Clear line focus"
+        >
+          ×
+        </button>
+      </div>
+      <div className="inspector-card-title">
         {entry.canonical.shortName || entry.canonical.longName || '(unnamed route)'}
       </div>
-      <div className="muted" style={{ fontFamily: 'ui-monospace, monospace', fontSize: 11 }}>
+      <div className="inspector-card-meta">
+        <ModeSwatch mode={entry.canonical.mode} size={12} />
+        <span>{MODE_LABEL[entry.canonical.mode]}</span>
+      </div>
+      <div className="muted inspector-card-sub" style={{ fontFamily: 'ui-monospace, monospace' }}>
         {entry.canonicalId}
       </div>
       {entry.renumbering && (
         <div className="muted" style={{ marginTop: 4 }}>
-          Renumbered from <code>{entry.renumbering.fromCanonicalId}</code> to{' '}
-          <code>{entry.renumbering.toCanonicalId}</code>
+          Renumbered: <code>{entry.renumbering.fromCanonicalId}</code> → <code>{entry.renumbering.toCanonicalId}</code>
         </div>
       )}
+
       <div className="diff-ab">
         <div className="diff-ab-col">
           <div className="diff-ab-head diff-ab-head--a">A · {aLabel ?? '—'}</div>
@@ -280,6 +389,172 @@ function RouteInspector({
           {b ? <RouteSideTable side={b} highlight={highlight} /> : <div className="diff-ab-absent">not present</div>}
         </div>
       </div>
+
+      <InspectorSection
+        title="Stops"
+        count={stopsSectionCount(stopsState.status, course)}
+      >
+        {stopsState.status === 'loading' && (
+          <div className="muted inspector-placeholder">Loading stops…</div>
+        )}
+        {stopsState.status === 'error' && (
+          <div className="muted inspector-placeholder" style={{ color: 'var(--removed)' }}>
+            Failed to load stops: {stopsState.message}
+          </div>
+        )}
+        {stopsState.status === 'ready' && directions.length === 0 && (
+          <div className="muted inspector-placeholder">
+            No stops found for this line.
+          </div>
+        )}
+
+        {stopsState.status === 'ready' && course && (
+          <DirectionPairBody
+            course={course}
+            courseIdx={Math.min(courseIdx, directions.length - 1)}
+            totalCourses={directions.length}
+            onToggle={() => setCourseIdx((i) => (i + 1) % directions.length)}
+            diffStopFocus={diffStopFocus}
+            onStopClick={(s) => { if (s.canonicalId) setDiffStopFocus(s.canonicalId); }}
+          />
+        )}
+      </InspectorSection>
+    </div>
+  );
+}
+
+function stopsSectionCount(
+  status: 'loading' | 'ready' | 'error',
+  course: DiffRouteDirection | null,
+): string | undefined {
+  if (status !== 'ready' || !course) return undefined;
+  const a = course.aStops.length;
+  const b = course.bStops.length;
+  return a === b ? `${a}` : `${a} / ${b}`;
+}
+
+/**
+ * Direction-paired stops body: pager header + two parallel numbered columns,
+ * one per side. Stops with `directionRole: 'only-here'` get an added/removed
+ * tint against the other column so it's visually obvious which side the stop
+ * belongs to in this direction, even when the stop itself is "unchanged".
+ */
+function DirectionPairBody({
+  course,
+  courseIdx,
+  totalCourses,
+  onToggle,
+  diffStopFocus,
+  onStopClick,
+}: {
+  course: DiffRouteDirection;
+  courseIdx: number;
+  totalCourses: number;
+  onToggle: () => void;
+  diffStopFocus: string | null;
+  onStopClick: (s: DiffStopRow) => void;
+}) {
+  return (
+    <>
+      <div className="route-course">
+        <div className="route-course-head">
+          <div>
+            <div className="muted route-course-label">
+              Course {courseIdx + 1} / {totalCourses}
+              {course.direction_id != null && <> · dir {course.direction_id}</>}
+            </div>
+            <div className="route-course-headsign">
+              <span title={course.headsignA}>A → {course.headsignA || '—'}</span>
+              <span className="muted" style={{ margin: '0 6px' }}>|</span>
+              <span title={course.headsignB}>B → {course.headsignB || '—'}</span>
+            </div>
+            <div className="muted route-course-trips">
+              ~{course.tripCountA.toLocaleString()} A trips · ~{course.tripCountB.toLocaleString()} B trips
+            </div>
+          </div>
+          {totalCourses > 1 && (
+            <button
+              type="button"
+              className="route-course-toggle"
+              onClick={onToggle}
+              title="Show other direction"
+            >
+              Other direction
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="diff-ab" style={{ marginTop: 8 }}>
+        <DirectionColumn
+          header="A"
+          tone="a"
+          stops={course.aStops}
+          diffStopFocus={diffStopFocus}
+          onStopClick={onStopClick}
+          absentSideLabel="not present on A"
+        />
+        <DirectionColumn
+          header="B"
+          tone="b"
+          stops={course.bStops}
+          diffStopFocus={diffStopFocus}
+          onStopClick={onStopClick}
+          absentSideLabel="not present on B"
+        />
+      </div>
+    </>
+  );
+}
+
+function DirectionColumn({
+  header,
+  tone,
+  stops,
+  diffStopFocus,
+  onStopClick,
+  absentSideLabel,
+}: {
+  header: string;
+  tone: 'a' | 'b';
+  stops: DiffStopRow[];
+  diffStopFocus: string | null;
+  onStopClick: (s: DiffStopRow) => void;
+  absentSideLabel: string;
+}) {
+  return (
+    <div className="diff-ab-col">
+      <div className={`diff-ab-head diff-ab-head--${tone}`}>{header}</div>
+      {stops.length === 0 ? (
+        <div className="diff-ab-absent">{absentSideLabel}</div>
+      ) : (
+        <div className="stop-pill-list" style={{ padding: 6 }}>
+          {stops.map((s) => {
+            // Pick the most informative tint for the pill: registry status
+            // first (added/removed/moved/…), then "only on this side of the
+            // direction" which we map to added/removed depending on tone.
+            const pillStatus =
+              s.status ??
+              (s.directionRole === 'only-here'
+                ? tone === 'a'
+                  ? 'removed'
+                  : 'added'
+                : null);
+            return (
+              <StopPill
+                key={`${tone}:${s.seq}:${s.stopId}`}
+                stopId={s.stopId}
+                stopName={s.stopName}
+                seq={s.seq}
+                idTag={s.stopId}
+                status={pillStatus}
+                selected={!!s.canonicalId && s.canonicalId === diffStopFocus}
+                onClick={() => onStopClick(s)}
+              />
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
