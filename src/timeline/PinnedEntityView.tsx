@@ -2,6 +2,7 @@ import { useMemo } from 'react';
 import { useAppStore } from '../state/app-store';
 import { useRegistry } from '../registry/useRegistry';
 import type { RawStop } from '../registry/stops-matcher';
+import { stripYearSuffix, yearOfFeed } from './math';
 
 /**
  * Right-panel card that renders a pinned canonical entity's per-feed history.
@@ -82,17 +83,25 @@ export default function PinnedEntityView() {
 
       <table className="pinned-table">
         <thead>
-          <tr><th>Feed</th><th>Present</th><th>Name</th><th>Lat / Lon</th></tr>
+          <tr><th>Year</th><th>Feed</th><th>Present</th><th>Name</th><th>Lat / Lon</th></tr>
         </thead>
         <tbody>
           {rows.map(({ feedId, member }) => {
-            const label = feeds[feedId]?.label ?? feedId;
+            const meta = feeds[feedId];
+            const fy = meta ? yearOfFeed(meta) : null;
+            const name = meta ? stripYearSuffix(meta.label) : feedId;
             const isActive = feedId === activeFeedId;
             return (
               <tr key={feedId} className={isActive ? 'active' : ''}>
+                <td
+                  style={{ fontVariantNumeric: 'tabular-nums', fontWeight: 600 }}
+                  title={fy?.synthetic ? 'Year inferred from ingest time' : undefined}
+                >
+                  {fy ? `${fy.year}${fy.synthetic ? '?' : ''}` : '—'}
+                </td>
                 <td>
                   {isActive && <span className="pinned-dot" title="Currently displayed" />}
-                  {label}
+                  {name}
                 </td>
                 <td>{member ? '●' : <span className="muted">—</span>}</td>
                 <td>{member?.name ?? <span className="muted">absent</span>}</td>

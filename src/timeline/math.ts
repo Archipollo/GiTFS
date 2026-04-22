@@ -127,3 +127,55 @@ export function yearsInRange(range: [number, number] | null): number[] {
   for (let y = lo; y <= hi; y++) out.push(y);
   return out;
 }
+
+// ---- display helpers ---------------------------------------------------
+//
+// Keep a single source of truth for how feeds are labelled so the timeline
+// slider, feeds list, inspector and diff views never disagree about "what
+// year is this?". The user-visible year always comes from `yearOfFeed`
+// (midpoint-of-validity), never from an incidental substring of the
+// filename or the raw feed_start_date.
+
+/** Format a GTFS `YYYYMMDD` string as `YYYY-MM-DD`; returns `null` if unparseable. */
+export function formatGtfsDate(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const s = String(raw).trim();
+  if (!/^\d{8}$/.test(s)) return null;
+  return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`;
+}
+
+/** Strip a trailing ` (YYYY)` suffix from a label so callers can render the year separately. */
+export function stripYearSuffix(label: string): string {
+  return label.replace(/\s*\(\d{4}\)\s*$/, '').trim();
+}
+
+/** Filename stem without `.zip`, with any trailing ` (YYYY)` suffix removed. */
+export function cleanFeedStem(sourceName: string): string {
+  const stem = sourceName.replace(/\.zip$/i, '');
+  return stripYearSuffix(stem);
+}
+
+/**
+ * Canonical feed label: `stem (YYYY)` where `YYYY` is the representative year
+ * of the feed's validity span (midpoint), falling back to the ingest year.
+ * This MUST agree with `yearOfFeed(meta).year`; the ingest pipeline and the
+ * rehydrate pipeline both call through here so the label never drifts from
+ * the timeline.
+ */
+export function buildFeedLabel(
+  sourceName: string,
+  feedStartDate: string | undefined,
+  feedEndDate: string | undefined,
+  loadedAt: number,
+): string {
+  const stem = cleanFeedStem(sourceName);
+  const year = yearOfFeed({
+    id: '',
+    label: '',
+    sourceName,
+    loadedAt,
+    feedStartDate,
+    feedEndDate,
+  }).year;
+  return `${stem} (${year})`;
+}

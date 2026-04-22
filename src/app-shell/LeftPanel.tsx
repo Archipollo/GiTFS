@@ -1,6 +1,7 @@
 import { useAppStore } from '../state/app-store';
 import { MODES, MODE_COLOR, MODE_LABEL } from '../gtfs/modes';
-import { yearOfFeed } from '../timeline/math';
+import { formatGtfsDate, stripYearSuffix, yearOfFeed } from '../timeline/math';
+import DiffSidebar from '../diff/DiffSidebar';
 
 export default function LeftPanel() {
   const mode = useAppStore((s) => s.mode);
@@ -36,15 +37,40 @@ export default function LeftPanel() {
         const f = feeds[id];
         const isActive = id === activeFeedId;
         const isCompare = id === compareFeedId;
+        const fy = yearOfFeed(f);
+        const displayName = stripYearSuffix(f.label);
+        const start = formatGtfsDate(f.feedStartDate);
+        const end = formatGtfsDate(f.feedEndDate);
+        const validity = start && end ? `${start} → ${end}` : start ?? end ?? '';
+        const rowTooltip = [
+          f.sourceName,
+          validity ? `Validity: ${validity}` : null,
+          fy.synthetic ? 'Year inferred from ingest time' : null,
+        ]
+          .filter(Boolean)
+          .join('\n');
         return (
           <div
             key={id}
             className={`feed-row ${isActive ? 'active' : ''} ${isCompare ? 'compare' : ''}`}
-            title={f.sourceName}
+            title={rowTooltip}
           >
+            <span
+              className={`feed-year${fy.synthetic ? ' feed-year--synthetic' : ''}`}
+              title={
+                fy.synthetic
+                  ? 'Inferred from ingest time — no feed_info/calendar dates available'
+                  : validity
+                    ? `Validity: ${validity}`
+                    : undefined
+              }
+            >
+              {fy.year}
+              {fy.synthetic ? '?' : ''}
+            </span>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {f.label}
+                {displayName}
               </div>
               <div className="muted">
                 {f.stopCount ?? '—'} stops · {f.routeCount ?? '—'} routes
@@ -111,12 +137,17 @@ export default function LeftPanel() {
         Stations serving multiple modes stay visible until all their modes are hidden.
       </p>
 
-      <h3>Mode</h3>
-      <p className="muted">
-        {mode === 'timeline' && 'Drag the slider to switch the year shown on the map.'}
-        {mode === 'diff' && 'Pick A (active) and B (compare) to see changes.'}
-        {mode === 'scenario' && 'Scenario editing is not yet implemented.'}
-      </p>
+      {mode === 'diff' ? (
+        <DiffSidebar />
+      ) : (
+        <>
+          <h3>Mode</h3>
+          <p className="muted">
+            {mode === 'timeline' && 'Drag the slider to switch the year shown on the map.'}
+            {mode === 'scenario' && 'Scenario editing is not yet implemented.'}
+          </p>
+        </>
+      )}
     </aside>
   );
 }

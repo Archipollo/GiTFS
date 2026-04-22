@@ -505,7 +505,7 @@
 .feed-row {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 8px;
   padding: 6px 8px;
   border: 1px solid var(--border);
   border-radius: 4px;
@@ -514,6 +514,41 @@
 }
 .feed-row.active { border-color: var(--accent); background: rgba(79,195,247,0.08); }
 .feed-row.compare:not(.active) { border-color: var(--modified); background: rgba(251,191,36,0.08); }
+
+/* Year badge — the single source of truth for "what year is this feed?".
+   Kept visually prominent so it's obvious at a glance, and a ? suffix plus
+   muted color flags years that had to be inferred from the ingest time. */
+.feed-year {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  padding: 3px 6px;
+  border-radius: 4px;
+  background: rgba(79, 195, 247, 0.14);
+  color: var(--accent);
+  font-weight: 700;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.3px;
+  border: 1px solid rgba(79, 195, 247, 0.28);
+  flex-shrink: 0;
+  line-height: 1;
+}
+.feed-row.active .feed-year {
+  background: rgba(79, 195, 247, 0.24);
+  border-color: rgba(79, 195, 247, 0.5);
+}
+.feed-row.compare:not(.active) .feed-year {
+  background: rgba(251, 191, 36, 0.18);
+  color: var(--modified);
+  border-color: rgba(251, 191, 36, 0.4);
+}
+.feed-year--synthetic {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--fg-dim);
+  border-color: rgba(255, 255, 255, 0.12);
+}
 
 .muted { color: var(--fg-dim); font-size: 12px; }
 
@@ -535,6 +570,185 @@
   border: 1px solid rgba(0,0,0,0.3);
   flex-shrink: 0;
 }
+
+/* Diff sidebar --------------------------------------------------------- */
+
+.diff-pair {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.08);
+  margin-bottom: 8px;
+}
+.diff-pair-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.diff-pair-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  font-weight: 700;
+  font-size: 11px;
+  background: rgba(79, 195, 247, 0.15);
+  color: var(--accent);
+  flex-shrink: 0;
+}
+.diff-pair-badge--b {
+  background: rgba(251, 191, 36, 0.18);
+  color: var(--modified);
+}
+.diff-pair-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.diff-pair-select {
+  flex: 1;
+  min-width: 0;
+  padding: 3px 6px;
+  font-size: 12px;
+}
+.diff-pair-arrow {
+  align-self: center;
+  color: var(--fg-dim);
+  font-size: 11px;
+  line-height: 1;
+  padding: 1px 0;
+}
+
+.diff-counts {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.diff-count {
+  display: grid;
+  grid-template-columns: 16px 14px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 4px;
+  cursor: pointer;
+  user-select: none;
+  border-radius: 4px;
+}
+.diff-count:hover { background: rgba(255, 255, 255, 0.04); }
+.diff-count.off .diff-count-label,
+.diff-count.off .diff-count-n { opacity: 0.45; }
+.diff-count input { margin: 0; }
+.diff-count-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 1px solid rgba(0, 0, 0, 0.35);
+  justify-self: center;
+}
+.diff-count-label { font-size: 13px; }
+.diff-count-n {
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+
+.diff-route-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.diff-route-table td {
+  padding: 3px 6px;
+  border-bottom: 1px solid var(--border);
+}
+.diff-route-table td:last-child {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg);
+}
+
+/* Diff inspector ------------------------------------------------------- */
+
+.diff-status-badge {
+  display: inline-block;
+  border: 1px solid;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-weight: 600;
+}
+.diff-inspector-totals {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  margin: 8px 0 12px;
+}
+.diff-inspector-totals td {
+  padding: 3px 6px;
+  border-bottom: 1px solid var(--border);
+}
+.diff-ab {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 10px;
+}
+.diff-ab-col {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.08);
+  overflow: hidden;
+}
+.diff-ab-head {
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  border-bottom: 1px solid var(--border);
+  color: var(--fg-dim);
+}
+.diff-ab-head--a { background: rgba(79, 195, 247, 0.08); color: var(--accent); }
+.diff-ab-head--b { background: rgba(251, 191, 36, 0.08); color: var(--modified); }
+.diff-ab-absent {
+  padding: 10px 8px;
+  font-size: 12px;
+  color: var(--fg-dim);
+  font-style: italic;
+  text-align: center;
+}
+.diff-ab-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.diff-ab-table td {
+  padding: 3px 6px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.diff-ab-table td:first-child {
+  width: 40%;
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.5px;
+}
+.diff-ab-table tr.changed td {
+  background: rgba(251, 191, 36, 0.08);
+  color: var(--modified);
+}
+.diff-ab-table tr:last-child td { border-bottom: none; }
 
 /* Map loading overlay -------------------------------------------------- */
 

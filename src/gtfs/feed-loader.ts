@@ -11,6 +11,7 @@ import {
   getRaw,
 } from './opfs';
 import { useAppStore, type FeedMeta } from '../state/app-store';
+import { buildFeedLabel } from '../timeline/math';
 
 const loaded = new Set<string>();
 const inFlight = new Map<string, Promise<void>>();
@@ -100,7 +101,14 @@ export async function rehydrateOnBoot(): Promise<void> {
     const metas: FeedMeta[] = [];
     for (const id of ids) {
       const meta = await getMeta(id);
-      if (meta) metas.push(meta);
+      if (!meta) continue;
+      // Re-derive the label so feeds ingested by older builds pick up fixes to
+      // year derivation without needing a re-upload. We do NOT persist this
+      // back to OPFS — the next fresh ingest will write the corrected label.
+      metas.push({
+        ...meta,
+        label: buildFeedLabel(meta.sourceName, meta.feedStartDate, meta.feedEndDate, meta.loadedAt),
+      });
     }
     // Earliest-loaded feed first, so it becomes the default active.
     metas.sort((a, b) => a.loadedAt - b.loadedAt);

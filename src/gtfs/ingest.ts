@@ -9,6 +9,7 @@ import { getDuckDB, getConnection } from './duckdb';
 import { useAppStore, type FeedMeta } from '../state/app-store';
 import { putRaw, putMeta, putParquet } from './opfs';
 import { markFeedLoaded } from './feed-loader';
+import { buildFeedLabel } from '../timeline/math';
 
 // GTFS files we care about. Others (fares_*, translations, etc.) are skipped.
 const GTFS_FILES = [
@@ -98,12 +99,13 @@ export async function ingestGtfsZip(file: File, opts: IngestOptions = {}): Promi
       const counts = await readCounts(conn, feedId, present);
       const [feedStartDate, feedEndDate] = await readFeedDates(conn, feedId, present);
 
-      const label = deriveLabel(file.name, feedStartDate);
+      const loadedAt = Date.now();
+      const label = buildFeedLabel(file.name, feedStartDate, feedEndDate, loadedAt);
       const meta: FeedMeta = {
         id: feedId,
         label,
         sourceName: file.name,
-        loadedAt: Date.now(),
+        loadedAt,
         stopCount: counts.stops,
         routeCount: counts.routes,
         tripCount: counts.trips,
@@ -198,12 +200,6 @@ function stripUtf8Bom(bytes: Uint8Array): Uint8Array {
     return bytes.subarray(3);
   }
   return bytes;
-}
-
-function deriveLabel(sourceName: string, feedStart?: string): string {
-  const stem = sourceName.replace(/\.zip$/i, '');
-  if (feedStart) return `${stem} (${feedStart.slice(0, 4)})`;
-  return stem;
 }
 
 async function readCounts(

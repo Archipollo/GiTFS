@@ -1,8 +1,11 @@
 import { useAppStore } from '../state/app-store';
 import { useRegistry } from '../registry/useRegistry';
 import PinnedEntityView from '../timeline/PinnedEntityView';
+import DiffInspector from '../diff/DiffInspector';
+import { formatGtfsDate, stripYearSuffix, yearOfFeed } from '../timeline/math';
 
 export default function RightPanel() {
+  const mode = useAppStore((s) => s.mode);
   const activeFeedId = useAppStore((s) => s.activeFeedId);
   const feed = useAppStore((s) => (activeFeedId ? s.feeds[activeFeedId] : null));
   const selection = useAppStore((s) => s.inspectorSelection);
@@ -24,27 +27,57 @@ export default function RightPanel() {
 
   const isPinned = pinnedEntity && canonical && pinnedEntity.canonicalId === canonical.canonicalId;
 
+  if (mode === 'diff') {
+    return (
+      <aside className="panel right">
+        <DiffInspector />
+      </aside>
+    );
+  }
+
   return (
     <aside className="panel right">
       <h3>Inspector</h3>
       {pinnedEntity && <PinnedEntityView />}
       {!feed && !pinnedEntity && <p className="muted">No feed selected.</p>}
-      {feed && (
-        <>
-          <div style={{ fontWeight: 600, marginBottom: 4 }}>{feed.label}</div>
-          <div className="muted">Source: {feed.sourceName}</div>
-          <div className="muted">
-            Loaded {new Date(feed.loadedAt).toLocaleString()}
-          </div>
-          <table style={{ marginTop: 12, width: '100%', fontSize: 13 }}>
-            <tbody>
-              <tr><td className="muted">Stops</td><td>{feed.stopCount ?? '—'}</td></tr>
-              <tr><td className="muted">Routes</td><td>{feed.routeCount ?? '—'}</td></tr>
-              <tr><td className="muted">Trips</td><td>{feed.tripCount ?? '—'}</td></tr>
-              <tr><td className="muted">Valid from</td><td>{feed.feedStartDate ?? '—'}</td></tr>
-              <tr><td className="muted">Valid to</td><td>{feed.feedEndDate ?? '—'}</td></tr>
-            </tbody>
-          </table>
+      {feed && (() => {
+        const fy = yearOfFeed(feed);
+        const start = formatGtfsDate(feed.feedStartDate);
+        const end = formatGtfsDate(feed.feedEndDate);
+        return (
+          <>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+              <span
+                className={`feed-year${fy.synthetic ? ' feed-year--synthetic' : ''}`}
+                title={fy.synthetic ? 'Year inferred from ingest time' : undefined}
+              >
+                {fy.year}
+                {fy.synthetic ? '?' : ''}
+              </span>
+              <span style={{ fontWeight: 600, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {stripYearSuffix(feed.label)}
+              </span>
+            </div>
+            <div className="muted">Source: {feed.sourceName}</div>
+            <div className="muted">
+              Loaded {new Date(feed.loadedAt).toLocaleString()}
+            </div>
+            <table style={{ marginTop: 12, width: '100%', fontSize: 13 }}>
+              <tbody>
+                <tr>
+                  <td className="muted">Year</td>
+                  <td title={fy.synthetic ? 'Inferred from ingest time' : 'Midpoint of validity span'}>
+                    {fy.year}
+                    {fy.synthetic ? ' (inferred)' : ''}
+                  </td>
+                </tr>
+                <tr><td className="muted">Stops</td><td>{feed.stopCount ?? '—'}</td></tr>
+                <tr><td className="muted">Routes</td><td>{feed.routeCount ?? '—'}</td></tr>
+                <tr><td className="muted">Trips</td><td>{feed.tripCount ?? '—'}</td></tr>
+                <tr><td className="muted">Valid from</td><td>{start ?? feed.feedStartDate ?? '—'}</td></tr>
+                <tr><td className="muted">Valid to</td><td>{end ?? feed.feedEndDate ?? '—'}</td></tr>
+              </tbody>
+            </table>
           {!selection && (
             <p className="muted" style={{ marginTop: 16 }}>
               Click a stop or route on the map to see attributes here.
@@ -125,7 +158,8 @@ export default function RightPanel() {
             </div>
           )}
         </>
-      )}
+        );
+      })()}
     </aside>
   );
 }

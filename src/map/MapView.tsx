@@ -11,6 +11,13 @@ import { MODES, MODE_COLOR, type Mode } from '../gtfs/modes';
 import MapOverlay from './MapOverlay';
 import { useRegistry } from '../registry/useRegistry';
 import { lookupStop } from '../registry/registry';
+import { useDiff } from '../diff/useDiff';
+import {
+  DIFF_COLOR,
+  diffMoveArrows,
+  diffStopGhosts,
+  diffStopPoints,
+} from '../diff/geojson';
 
 const INITIAL_CENTER: [number, number] = [14.55, 47.6];
 const INITIAL_ZOOM = 6.5;
@@ -23,6 +30,17 @@ const PRIMARY_COLOR_EXPR: ExpressionSpecification = [
   'tram', MODE_COLOR.tram,
   'bus', MODE_COLOR.bus,
   MODE_COLOR.other,
+];
+
+const DIFF_COLOR_EXPR: ExpressionSpecification = [
+  'match',
+  ['get', 'status'],
+  'added', DIFF_COLOR.added,
+  'removed', DIFF_COLOR.removed,
+  'moved', DIFF_COLOR.moved,
+  'renamed', DIFF_COLOR.renamed,
+  'unchanged', DIFF_COLOR.unchanged,
+  '#94a3b8',
 ];
 
 const STYLE: maplibregl.StyleSpecification = {
@@ -61,6 +79,17 @@ export default function MapView() {
   const setInspectorSelection = useAppStore((s) => s.setInspectorSelection);
   const registrySnapshot = useRegistry();
   const registryFocus = useAppStore((s) => s.registryFocus);
+
+  // Diff mode plumbing -----------------------------------------------------
+  const appMode = useAppStore((s) => s.mode);
+  const compareFeedId = useAppStore((s) => s.compareFeedId);
+  const diffStopVisibility = useAppStore((s) => s.diffStopVisibility);
+  const diffFocus = useAppStore((s) => s.diffFocus);
+  const diffStatus = useDiff(
+    appMode === 'diff' ? activeFeedId : null,
+    appMode === 'diff' ? compareFeedId : null,
+  );
+  const diffActive = diffStatus.kind === 'ready';
 
   // Prebuilt-GeoJSON cache keyed by feedId. Populated lazily on first view of
   // a feed and proactively by the background prefetcher. Once a feed is here,
@@ -109,6 +138,9 @@ export default function MapView() {
       map.addSource('stops', { type: 'geojson', data: emptyFC() });
       map.addSource('shapes', { type: 'geojson', data: emptyFC() });
       map.addSource('registry-focus', { type: 'geojson', data: emptyFC() });
+      map.addSource('diff-stops', { type: 'geojson', data: emptyFC() });
+      map.addSource('diff-ghost', { type: 'geojson', data: emptyFC() });
+      map.addSource('diff-arrow', { type: 'geojson', data: emptyFC() });
       map.addLayer({
         id: 'shapes-line',
         type: 'line',
@@ -142,6 +174,63 @@ export default function MapView() {
           'circle-stroke-color': '#fbbf24',
           'circle-stroke-width': 3,
         },
+      });
+
+      // Diff overlay layers: invisible (empty sources) in non-diff modes.
+      // Order matters: arrows under everything, then ghosts, then colored dots.
+      map.addLayer({
+        id: 'diff-arrow-line',
+        type: 'line',
+        source: 'diff-arrow',
+        layout: { 'line-cap': 'round' },
+        paint: {
+          'line-color': DIFF_COLOR.moved,
+          'line-width': ['interpolate', ['linear'], ['zoom'], 8, 0.8, 14, 2],
+          'line-opacity': 0.85,
+          'line-dasharray': [1.5, 1.5],
+        },
+      });
+      map.addLayer({
+        id: 'diff-ghost-circle',
+        type: 'circle',
+        source: 'diff-ghost',
+        paint: {
+          'circle-radius': ['interpolate', ['linear'], ['zoom'], 8, 2, 14, 4],
+          'circle-color': DIFF_COLOR.moved,
+          'circle-opacity': 0.35,
+          'circle-stroke-color': '#0f1115',
+          'circle-stroke-width': 0.5,
+        },
+      });
+      map.addLayer({
+        id: 'diff-stops-circle',
+        type: 'circle',
+        source: 'diff-stops',
+        paint: {
+          'circle-radius': ['interpolate', ['linear'], ['zoom'], 8, 2.5, 14, 5.5],
+          'circle-color': DIFF_COLOR_EXPR,
+          'circle-stroke-color': '#0f1115',
+          'circle-stroke-width': 0.5,
+          'circle-opacity': [
+            'case',
+            ['==', ['get', 'status'], 'unchanged'], 0.55,
+            0.95,
+          ],
+        },
+      });
+      map.on('mouseenter', 'diff-stops-circle', () => {
+        map.getCanvas().style.cursor = 'pointer';
+      });
+      map.on('mouseleave', 'diff-stops-circle', () => {
+        map.getCanvas().style.cursor = '';
+      });
+      map.on('click', 'diff-stops-circle', (evt) => {
+        const f = evt.features?.[0];
+        if (!f) return;
+        const canonicalId = String(f.properties?.canonicalId ?? '');
+        if (!canonicalId) return;
+        useAppStore.getState().setDiffFocus({ kind: 'stop', canonicalId });
+        setInspectorSelection(null);
       });
 
       map.on('mouseenter', 'stops-circle', () => {
@@ -313,6 +402,63 @@ export default function MapView() {
     });
     map.flyTo({ center: [lon, lat], zoom: Math.max(map.getZoom(), 13), duration: 700 });
   }, [registryFocus, ready, registrySnapshot]);
+
+  // Populate / clear diff overlay sources.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    if (diffStatus.kind === 'ready') {
+      setSource(map, 'diff-stops', diffStopPoints(diffStatus.result, diffStopVisibility));
+      setSource(map, 'diff-ghost', diffStopGhosts(diffStatus.result, diffStopVisibility));
+      setSource(map, 'diff-arrow', diffMoveArrows(diffStatus.result, diffStopVisibility));
+    } else {
+      setSource(map, 'diff-stops', emptyFC());
+      setSource(map, 'diff-ghost', emptyFC());
+      setSource(map, 'diff-arrow', emptyFC());
+    }
+  }, [diffStatus, diffStopVisibility, ready]);
+
+  // In diff mode: hide per-feed stops and dim shapes so the overlay pops.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    const showDiffOverlay = appMode === 'diff' && diffActive;
+    map.setLayoutProperty(
+      'stops-circle',
+      'visibility',
+      !showDiffOverlay && showStops ? 'visible' : 'none',
+    );
+    map.setPaintProperty(
+      'shapes-line',
+      'line-opacity',
+      showDiffOverlay ? 0.25 : 0.8,
+    );
+    const diffVis: maplibregl.CircleLayerSpecification['layout'] = {
+      visibility: showDiffOverlay ? 'visible' : 'none',
+    };
+    map.setLayoutProperty('diff-stops-circle', 'visibility', diffVis.visibility!);
+    map.setLayoutProperty('diff-ghost-circle', 'visibility', diffVis.visibility!);
+    map.setLayoutProperty('diff-arrow-line', 'visibility', diffVis.visibility!);
+  }, [appMode, diffActive, ready, showStops]);
+
+  // Fly to the focused diff entry.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    if (!diffFocus || diffStatus.kind !== 'ready') return;
+    const entry = diffStatus.result.stops.find((e) => e.canonicalId === diffFocus.canonicalId);
+    if (!entry) return;
+    const coord = entry.b
+      ? [entry.b.lon, entry.b.lat]
+      : entry.a
+        ? [entry.a.lon, entry.a.lat]
+        : [entry.canonical.lon, entry.canonical.lat];
+    map.flyTo({
+      center: coord as [number, number],
+      zoom: Math.max(map.getZoom(), 14),
+      duration: 600,
+    });
+  }, [diffFocus, diffStatus, ready]);
 
   return (
     <>

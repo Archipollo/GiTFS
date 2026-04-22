@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { MODES, type Mode } from '../gtfs/modes';
 import { removeFeedFromOPFS } from '../gtfs/opfs';
+import type { StopStatus, RouteStatus } from '../diff/engine';
 
 export type AppMode = 'timeline' | 'diff' | 'scenario';
 
@@ -97,6 +98,23 @@ export interface AppState {
   /** A pinned canonical entity whose history is shown in the inspector across years. */
   pinnedEntity: PinnedEntity | null;
   setPinnedEntity: (p: PinnedEntity | null) => void;
+
+  // Diff mode ---------------------------------------------------------------
+  /** Which change categories to show on the map / in the lists. */
+  diffStopVisibility: Record<StopStatus, boolean>;
+  toggleDiffStopVisibility: (s: StopStatus) => void;
+  diffRouteVisibility: Record<RouteStatus, boolean>;
+  toggleDiffRouteVisibility: (s: RouteStatus) => void;
+  /**
+   * A canonical diff entry the user has focused from a list. The map should
+   * fly to its representative coordinate and the inspector should show its
+   * A/B details.
+   */
+  diffFocus:
+    | { kind: 'stop'; canonicalId: string }
+    | { kind: 'route'; canonicalId: string }
+    | null;
+  setDiffFocus: (f: AppState['diffFocus']) => void;
 }
 
 export function selectMapBusy(s: AppState): boolean {
@@ -121,11 +139,13 @@ export const useAppStore = create<AppState>((set) => ({
   mode: 'timeline',
   setMode: (mode) =>
     set((s) => {
-      if (mode !== 'diff') return { mode };
-      if (s.feedOrder.length < 2) return { mode, compareFeedId: null };
-      if (s.compareFeedId && s.compareFeedId !== s.activeFeedId) return { mode };
+      if (mode !== 'diff') return { mode, diffFocus: null };
+      if (s.feedOrder.length < 2) return { mode, compareFeedId: null, diffFocus: null };
+      if (s.compareFeedId && s.compareFeedId !== s.activeFeedId) {
+        return { mode, diffFocus: null };
+      }
       const fallback = s.feedOrder.find((id) => id !== s.activeFeedId) ?? null;
-      return { mode, compareFeedId: fallback };
+      return { mode, compareFeedId: fallback, diffFocus: null };
     }),
 
   feeds: {},
@@ -205,4 +225,30 @@ export const useAppStore = create<AppState>((set) => ({
 
   pinnedEntity: null,
   setPinnedEntity: (pinnedEntity) => set({ pinnedEntity }),
+
+  diffStopVisibility: {
+    added: true,
+    removed: true,
+    moved: true,
+    renamed: true,
+    // Unchanged stops overwhelm the map; hide by default but let the user re-enable.
+    unchanged: false,
+  },
+  toggleDiffStopVisibility: (s) =>
+    set((st) => ({
+      diffStopVisibility: { ...st.diffStopVisibility, [s]: !st.diffStopVisibility[s] },
+    })),
+  diffRouteVisibility: {
+    added: true,
+    removed: true,
+    renumbered: true,
+    modified: true,
+    unchanged: false,
+  },
+  toggleDiffRouteVisibility: (s) =>
+    set((st) => ({
+      diffRouteVisibility: { ...st.diffRouteVisibility, [s]: !st.diffRouteVisibility[s] },
+    })),
+  diffFocus: null,
+  setDiffFocus: (diffFocus) => set({ diffFocus }),
 }));
