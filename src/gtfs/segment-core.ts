@@ -89,6 +89,8 @@ const COS_DIR_MIN = Math.cos(Math.PI / 4);
 
 // ---- Local equirectangular projection (metres around Austria) -------
 
+// Local projection anchor tuned for Central Europe (Austria-centric feeds).
+// If this diffing engine is reused for a far-away region, update LAT_REF.
 const LAT_REF = 47.5;
 const M_PER_DEG_LAT = 111_132;
 const M_PER_DEG_LON = 111_320 * Math.cos((LAT_REF * Math.PI) / 180);
@@ -204,7 +206,13 @@ class SegmentIndex {
     const cx = Math.floor(px / cs);
     const cy = Math.floor(py / cs);
     const maxSq = maxDist * maxDist;
-    const stamp = ++this.queryCounter;
+    let stamp = (this.queryCounter + 1) >>> 0;
+    if (stamp === 0) {
+      // Uint32 stamp wrap-around: clear all stamps so dedup remains exact.
+      this.seenStamp.fill(0);
+      stamp = 1;
+    }
+    this.queryCounter = stamp;
     for (let dy = -reach; dy <= reach; dy++) {
       for (let dx = -reach; dx <= reach; dx++) {
         const bucket = this.cells.get(`${cx + dx}:${cy + dy}`);

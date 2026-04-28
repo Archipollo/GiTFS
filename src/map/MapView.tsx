@@ -639,8 +639,6 @@ export default function MapView() {
         console.info('[diff-segments] computed', {
           feedA,
           feedB,
-          segmentsA: idxA.segmentCount,
-          segmentsB: idxB.segmentCount,
           runs: diffed.runs.length,
           dtMs,
         });

@@ -16,12 +16,12 @@ import {
   type DiffedRun,
   type DiffedShapes,
   type GeomStatus,
-  type ShapeIndex,
 } from './segment-core';
+import type { ShapePolyline } from './queries';
 
 // Re-export types and pure computation for consumers that don't need
 // the caching layer (e.g. tests, the worker itself).
-export type { DiffedRun, DiffedShapes, GeomStatus, ShapeIndex };
+export type { DiffedRun, DiffedShapes, GeomStatus, ShapeIndex } from './segment-core';
 export { buildShapeIndex, diffShapes };
 
 /** Palette shared by the diff map layers and the sidebar swatches. */
@@ -33,19 +33,24 @@ export const SEGMENT_COLOR: Record<GeomStatus, string> = {
 
 // ---- Per-feed shape cache ------------------------------------------
 
-const indexCache = new Map<string, Promise<ShapeIndex>>();
+export interface FeedShapes {
+  feedId: string;
+  shapes: readonly ShapePolyline[];
+}
+
+const indexCache = new Map<string, Promise<FeedShapes>>();
 
 /**
- * Cached per-feed shape fetch. The returned `ShapeIndex` is
- * intentionally thin (just `{feedId, shapes}`) — the heavy buffer
- * polygons are built inside the worker, off the main thread.
+ * Cached per-feed shape fetch. This intentionally returns only
+ * `{feedId, shapes}` so the heavy segment index build stays off the
+ * main thread inside the worker.
  */
-export function getShapeIndex(feedId: string): Promise<ShapeIndex> {
+export function getShapeIndex(feedId: string): Promise<FeedShapes> {
   const hit = indexCache.get(feedId);
   if (hit) return hit;
   const p = (async () => {
     const shapes = await fetchShapes(feedId);
-    return buildShapeIndex(feedId, shapes);
+    return { feedId, shapes } as FeedShapes;
   })().catch((err) => {
     indexCache.delete(feedId);
     throw err;
@@ -89,7 +94,7 @@ function getDiffWorker(): Worker {
 
 // ---- Pair-level diff cache -----------------------------------------
 
-const diffCache = new Map<string, Promise<DiffedShapes>>();
+const diffCache = new Map<string, Map<string, Promise<DiffedShapes>>>();
 
 /**
  * Compute and cache the buffer-overlay diff for a feed pair. The
@@ -99,9 +104,13 @@ const diffCache = new Map<string, Promise<DiffedShapes>>();
  * is still in flight — so React effects that fire multiple times
  * never duplicate the work.
  */
-export function getDiffedShapes(idxA: ShapeIndex, idxB: ShapeIndex): Promise<DiffedShapes> {
-  const key = `${idxA.feedId}:${idxB.feedId}`;
-  const hit = diffCache.get(key);
+export function getDiffedShapes(idxA: FeedShapes, idxB: FeedShapes): Promise<DiffedShapes> {
+  let byB = diffCache.get(idxA.feedId);
+  if (!byB) {
+    byB = new Map<string, Promise<DiffedShapes>>();
+    diffCache.set(idxA.feedId, byB);
+  }
+  const hit = byB.get(idxB.feedId);
   if (hit) return hit;
   const p = new Promise<DiffedShapes>((resolve, reject) => {
     const id = ++_msgId;
@@ -115,10 +124,12 @@ export function getDiffedShapes(idxA: ShapeIndex, idxB: ShapeIndex): Promise<Dif
       shapesB: idxB.shapes,
     });
   }).catch((err) => {
-    diffCache.delete(key);
+    const mapForA = diffCache.get(idxA.feedId);
+    mapForA?.delete(idxB.feedId);
+    if (mapForA && mapForA.size === 0) diffCache.delete(idxA.feedId);
     throw err;
   });
-  diffCache.set(key, p);
+  byB.set(idxB.feedId, p);
   return p;
 }
 
@@ -128,10 +139,10 @@ export function getDiffedShapes(idxA: ShapeIndex, idxB: ShapeIndex): Promise<Dif
  * re-ingest of the same id doesn't reuse stale geometry.
  */
 export function dropDiffCache(feedId: string): void {
-  for (const key of [...diffCache.keys()]) {
-    if (key.startsWith(`${feedId}:`) || key.endsWith(`:${feedId}`)) {
-      diffCache.delete(key);
-    }
+  diffCache.delete(feedId);
+  for (const [feedA, byB] of diffCache) {
+    byB.delete(feedId);
+    if (byB.size === 0) diffCache.delete(feedA);
   }
 }
 
