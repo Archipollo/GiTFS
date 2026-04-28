@@ -115,13 +115,6 @@ export default function DiffInspector() {
         />
       )}
 
-      {!hasAny && (
-        <p className="muted" style={{ marginTop: 10 }}>
-          Click a colored dot on the map (or a row in the Changelog drawer)
-          to inspect that change. From a stop you can walk to any of its
-          lines — even ones that were added or removed.
-        </p>
-      )}
     </div>
   );
 }

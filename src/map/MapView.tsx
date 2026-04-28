@@ -26,12 +26,14 @@ import {
 } from '../diff/geojson';
 import {
   SEGMENT_COLOR,
-  diffShapes,
+  dropDiffCache,
   dropShapeIndex,
+  getDiffedShapes,
   getShapeIndex,
   resolveClickedRun,
   segmentDiffToGeoJSON,
   type DiffedRun,
+  type DiffedShapes,
 } from '../gtfs/segment-graph';
 import { getRoutesForShape } from '../inspector/data';
 
@@ -118,6 +120,9 @@ export default function MapView() {
     appMode === 'diff' ? compareFeedId : null,
   );
   const diffActive = diffStatus.kind === 'ready';
+  // Cached result of the expensive off-thread diffShapes computation.
+  // Only changes when the feed pair changes, not when visibility toggles.
+  const [diffedShapes, setDiffedShapes] = useState<DiffedShapes | null>(null);
 
   // Prebuilt-GeoJSON cache keyed by feedId. Populated lazily on first view of
   // a feed and proactively by the background prefetcher. Once a feed is here,
@@ -184,12 +189,23 @@ export default function MapView() {
         },
       });
 
-      // Segment-level line diff. We stack six layers so unchanged (dim
-      // grey) sits at the bottom, and the removed/added colored strokes get
-      // a thin dark casing beneath them. The casing makes green pop on an
-      // OSM basemap (where vivid greens would otherwise get lost in parks).
-      // All six layers are hidden in non-diff modes by the visibility
+      // Segment-level line diff. Unchanged sits at the bottom as a legible
+      // neutral network backdrop, while added/removed strokes get stronger
+      // casing so the actual changes still read first. All layers are hidden
+      // in non-diff modes by the visibility
       // effect further down.
+      map.addLayer({
+        id: 'diff-segments-unchanged-casing',
+        type: 'line',
+        source: 'diff-segments',
+        filter: ['==', ['get', 'geom_status'], 'unchanged'],
+        layout: { 'line-cap': 'round', 'line-join': 'round' },
+        paint: {
+          'line-color': '#f8fafc',
+          'line-width': ['interpolate', ['linear'], ['zoom'], 8, 2.0, 14, 4.0],
+          'line-opacity': 0.55,
+        },
+      });
       map.addLayer({
         id: 'diff-segments-unchanged-line',
         type: 'line',
@@ -198,8 +214,8 @@ export default function MapView() {
         layout: { 'line-cap': 'round', 'line-join': 'round' },
         paint: {
           'line-color': SEGMENT_COLOR.unchanged,
-          'line-width': ['interpolate', ['linear'], ['zoom'], 8, 0.9, 14, 2.2],
-          'line-opacity': 0.5,
+          'line-width': ['interpolate', ['linear'], ['zoom'], 8, 1.2, 14, 2.8],
+          'line-opacity': 0.82,
         },
       });
       map.addLayer({
@@ -515,14 +531,15 @@ export default function MapView() {
   }, [ready, feedOrder, ensureFeedRender]);
 
   // Drop cache entries for feeds the user has removed. Also evict the
-  // segment-graph cache so a later re-ingest of the same id doesn't
-  // reuse stale geometry.
+  // segment-graph caches so a later re-ingest of the same id doesn't
+  // reuse stale geometry or stale diff results.
   useEffect(() => {
     const valid = new Set(feedOrder);
     for (const key of [...cacheRef.current.keys()]) {
       if (!valid.has(key)) {
         cacheRef.current.delete(key);
         dropShapeIndex(key);
+        dropDiffCache(key);
       }
     }
     for (const key of [...pendingRef.current.keys()]) {
@@ -596,32 +613,18 @@ export default function MapView() {
     setSource(map, 'diff-arrow', diffMoveArrows(diffStatus.result, diffStopVisibility));
   }, [diffStatus, diffStopVisibility, ready]);
 
-  // Build the segment-level geometry diff between the two feeds' shapes.
-  // Each feed is indexed by its line segments; every vertex of the
-  // other feed is tested against that index with a point-to-segment
-  // distance so we can tell "is this bit of A also in B?" without
-  // fabricating any new geometry. Runs of consecutive same-class
-  // vertices are emitted as LineStrings using the original shape
-  // vertices verbatim.
-  //
-  // Mode filtering is applied at GeoJSON emit time (via `accept`) so the
-  // sidebar length totals move in lock-step with the mode toggles.
+  // Effect A — compute the segment diff in a Web Worker.
+  // Only re-runs when the feed pair changes, not on visibility toggles.
+  // The result is cached inside getDiffedShapes, so switching back to a
+  // previously seen pair is instant.
   useEffect(() => {
-    const map = mapRef.current;
-    if (!map || !ready) return;
     if (diffStatus.kind !== 'ready') {
-      setSource(map, 'diff-segments', emptyFC());
-      setDiffSegmentSummary(null);
+      setDiffedShapes(null);
       return;
     }
     let cancelled = false;
     const feedA = diffStatus.feedA;
     const feedB = diffStatus.feedB;
-    const activeModes = new Set(MODES.filter((m) => modeVisibility[m]));
-    const accept = (r: DiffedRun) => {
-      const modes = r.modes.length ? r.modes : (['other'] as Mode[]);
-      return modes.some((m) => activeModes.has(m));
-    };
     (async () => {
       try {
         const [idxA, idxB] = await Promise.all([
@@ -630,39 +633,60 @@ export default function MapView() {
         ]);
         if (cancelled) return;
         const t0 = performance.now();
-        const diffed = diffShapes(idxA, idxB);
-        const { features, lengths } = segmentDiffToGeoJSON(
-          diffed,
-          diffSegmentVisibility,
-          accept,
-        );
+        const diffed = await getDiffedShapes(idxA, idxB);
         if (cancelled) return;
         const dtMs = Math.round(performance.now() - t0);
-        console.info('[diff-segments] built', {
+        console.info('[diff-segments] computed', {
           feedA,
           feedB,
           segmentsA: idxA.segmentCount,
           segmentsB: idxB.segmentCount,
           runs: diffed.runs.length,
-          features: features.features.length,
-          lengthsKm: {
-            added: Math.round(lengths.added / 1000),
-            removed: Math.round(lengths.removed / 1000),
-            unchanged: Math.round(lengths.unchanged / 1000),
-          },
           dtMs,
         });
-        setSource(map, 'diff-segments', features);
-        setDiffSegmentSummary({ feedA, feedB, lengths });
+        setDiffedShapes(diffed);
       } catch (err) {
-        if (!cancelled) console.warn('diff-segments build failed', err);
+        if (!cancelled) console.warn('diff-segments compute failed', err);
       }
     })();
     return () => {
       cancelled = true;
     };
+  }, [diffStatus]);
+
+  // Effect B — convert the cached diff result to GeoJSON for MapLibre.
+  // Runs cheaply whenever visibility or mode filters change, without
+  // re-doing any spatial computation.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    if (!diffedShapes) {
+      setSource(map, 'diff-segments', emptyFC());
+      setDiffSegmentSummary(null);
+      return;
+    }
+    const activeModes = new Set(MODES.filter((m) => modeVisibility[m]));
+    const accept = (r: DiffedRun) => {
+      const modes = r.modes.length ? r.modes : (['other'] as Mode[]);
+      return modes.some((m) => activeModes.has(m));
+    };
+    const { features, lengths } = segmentDiffToGeoJSON(
+      diffedShapes,
+      diffSegmentVisibility,
+      accept,
+    );
+    console.info('[diff-segments] rendered', {
+      features: features.features.length,
+      lengthsKm: {
+        added: Math.round(lengths.added / 1000),
+        removed: Math.round(lengths.removed / 1000),
+        unchanged: Math.round(lengths.unchanged / 1000),
+      },
+    });
+    setSource(map, 'diff-segments', features);
+    setDiffSegmentSummary({ feedA: diffedShapes.feedA, feedB: diffedShapes.feedB, lengths });
   }, [
-    diffStatus,
+    diffedShapes,
     diffSegmentVisibility,
     modeVisibility,
     ready,
@@ -692,6 +716,7 @@ export default function MapView() {
     map.setLayoutProperty('diff-ghost-circle', 'visibility', vis);
     map.setLayoutProperty('diff-arrow-line', 'visibility', vis);
     for (const id of [
+      'diff-segments-unchanged-casing',
       'diff-segments-unchanged-line',
       'diff-segments-removed-casing',
       'diff-segments-removed-line',

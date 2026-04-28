@@ -133,19 +133,12 @@ export default function LeftPanel() {
           <span>{MODE_LABEL[m]}</span>
         </label>
       ))}
-      <p className="muted" style={{ marginTop: 8 }}>
-        Stations serving multiple modes stay visible until all their modes are hidden.
-      </p>
 
       {mode === 'diff' ? (
         <DiffSidebar />
       ) : (
         <>
           <h3>Mode</h3>
-          <p className="muted">
-            {mode === 'timeline' && 'Drag the slider to switch the year shown on the map.'}
-            {mode === 'scenario' && 'Scenario editing is not yet implemented.'}
-          </p>
         </>
       )}
     </aside>
