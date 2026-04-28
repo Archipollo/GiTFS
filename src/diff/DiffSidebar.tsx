@@ -8,7 +8,7 @@ import { useAppStore, type FeedMeta } from '../state/app-store';
 import { useDiff } from './useDiff';
 import { DIFF_COLOR } from './geojson';
 import { SEGMENT_COLOR, type GeomStatus } from '../gtfs/segment-graph';
-import type { StopStatus, RouteStatus } from './engine';
+import type { StopStatus } from './engine';
 import { useRegistry } from '../registry/useRegistry';
 import { isRegistryStale } from '../registry/registry';
 import { stripYearSuffix, yearOfFeed } from '../timeline/math';
@@ -24,14 +24,6 @@ const STOP_STATUS_LABELS: Array<{ id: StopStatus; label: string }> = [
   { id: 'removed', label: 'Removed' },
   { id: 'moved', label: 'Moved' },
   { id: 'renamed', label: 'Renamed' },
-  { id: 'unchanged', label: 'Unchanged' },
-];
-
-const ROUTE_STATUS_LABELS: Array<{ id: RouteStatus; label: string }> = [
-  { id: 'added', label: 'Added' },
-  { id: 'removed', label: 'Removed' },
-  { id: 'renumbered', label: 'Renumbered' },
-  { id: 'modified', label: 'Modified' },
   { id: 'unchanged', label: 'Unchanged' },
 ];
 
@@ -149,13 +141,6 @@ export default function DiffSidebar() {
           </div>
 
           <h3>Line geometry</h3>
-          <p
-            className="muted"
-            style={{ margin: '0 0 6px', fontSize: 11, lineHeight: 1.35 }}
-          >
-            Lines are compared at the segment level — shared trackage reads
-            as unchanged, only the truly different bits are highlighted.
-          </p>
           <div className="diff-counts">
             {SEGMENT_STATUS_LABELS.map(({ id, label, hint }) => {
               const on = diffSegmentVisibility[id];
@@ -184,26 +169,6 @@ export default function DiffSidebar() {
             })}
           </div>
 
-          <h3 style={{ marginTop: 14 }}>Line entities</h3>
-          <p
-            className="muted"
-            style={{ margin: '0 0 6px', fontSize: 11, lineHeight: 1.35 }}
-          >
-            Route-level classification from the Entity Registry. Shown for
-            reference; map coloring follows the geometry diff above.
-          </p>
-          <div className="diff-counts">
-            {ROUTE_STATUS_LABELS.map(({ id, label }) => {
-              const n = diff.result.summary.routes[id];
-              return (
-                <div key={id} className="diff-count on" style={{ cursor: 'default' }}>
-                  <span style={{ width: 14 }} />
-                  <span className="diff-count-label">{label}</span>
-                  <span className="diff-count-n">{n}</span>
-                </div>
-              );
-            })}
-          </div>
         </>
       )}
     </div>

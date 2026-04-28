@@ -35,13 +35,6 @@ export default function RightPanel() {
         <FeedSummary />
       )}
 
-      {!hasSelection && feed && (
-        <p className="muted" style={{ marginTop: 12 }}>
-          Click a stop or a line on the map to inspect it. From a stop, pick
-          any of its lines to open the line's details below.
-        </p>
-      )}
-
       {!feed && !pinnedEntity && <p className="muted">No feed selected.</p>}
     </aside>
   );

@@ -3,6 +3,7 @@ import { MODES, type Mode } from '../gtfs/modes';
 import { removeFeedFromOPFS } from '../gtfs/opfs';
 import type { StopStatus, RouteStatus } from '../diff/engine';
 import type { GeomStatus } from '../gtfs/segment-graph';
+import { yearOfFeed } from '../timeline/math';
 
 export type AppMode = 'timeline' | 'diff' | 'scenario';
 
@@ -198,11 +199,30 @@ export const useAppStore = create<AppState>((set) => ({
       const cleared = { diffStopFocus: null, diffRouteFocus: null } as const;
       if (mode !== 'diff') return { mode, ...cleared };
       if (s.feedOrder.length < 2) return { mode, compareFeedId: null, ...cleared };
+      // Preserve an explicit pair the user already set up via the diff
+      // sidebar (they may want a non-standard ordering for a specific
+      // comparison). Otherwise, default to the canonical
+      // older-A → newer-B layout so "added" / "removed" read as
+      // changes from the past to the present.
       if (s.compareFeedId && s.compareFeedId !== s.activeFeedId) {
         return { mode, ...cleared };
       }
-      const fallback = s.feedOrder.find((id) => id !== s.activeFeedId) ?? null;
-      return { mode, compareFeedId: fallback, ...cleared };
+      const sorted = [...s.feedOrder].sort(
+        (a, b) => yearOfFeed(s.feeds[a]).year - yearOfFeed(s.feeds[b]).year,
+      );
+      const oldest = sorted[0] ?? null;
+      const newest = sorted[sorted.length - 1] ?? null;
+      if (!oldest || !newest || oldest === newest) {
+        return { mode, compareFeedId: null, ...cleared };
+      }
+      return {
+        mode,
+        activeFeedId: oldest,
+        compareFeedId: newest,
+        inspectorStop: null,
+        inspectorRoute: null,
+        ...cleared,
+      };
     }),
 
   feeds: {},
