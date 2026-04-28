@@ -170,6 +170,16 @@ function buildCreateSql(table: string, csvVirtualPath: string, name: GtfsFileNam
   }
 }
 
+// Tables without which a feed is unusable. If transcoding one of these fails
+// we cannot silently continue — the feed would look fine until the first
+// registry build or map open, at which point DuckDB errors out from deep
+// inside a SELECT with a cryptic "table does not exist" message.
+const CRITICAL_GTFS_FILES: ReadonlySet<GtfsFileName> = new Set([
+  'stops.txt',
+  'routes.txt',
+  'trips.txt',
+]);
+
 async function transcodeTableToParquet(
   conn: Awaited<ReturnType<typeof getConnection>>,
   db: Awaited<ReturnType<typeof getDuckDB>>,
@@ -189,6 +199,12 @@ async function transcodeTableToParquet(
     const bytes = await db.copyFileToBuffer(virtualPath);
     await putParquet(feedId, stem, bytes);
   } catch (err) {
+    if (CRITICAL_GTFS_FILES.has(name)) {
+      throw new Error(
+        `Failed to write ${name} parquet shard: ${err instanceof Error ? err.message : String(err)}. ` +
+          `This table is required; aborting ingest so the feed isn't left half-persisted.`,
+      );
+    }
     console.warn(`parquet transcode failed for ${name}`, err);
   } finally {
     await db.dropFile(virtualPath).catch(() => {});

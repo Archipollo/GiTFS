@@ -6,7 +6,13 @@ import maplibregl, {
 } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { useAppStore } from '../state/app-store';
-import { fetchStops, fetchShapes, type StopPoint, type ShapePolyline } from '../gtfs/queries';
+import {
+  fetchStops,
+  fetchShapes,
+  fetchShapeRouteMap,
+  type StopPoint,
+  type ShapePolyline,
+} from '../gtfs/queries';
 import { MODES, MODE_COLOR, type Mode } from '../gtfs/modes';
 import MapOverlay from './MapOverlay';
 import { useRegistry } from '../registry/useRegistry';
@@ -18,6 +24,15 @@ import {
   diffStopGhosts,
   diffStopPoints,
 } from '../diff/geojson';
+import {
+  SEGMENT_COLOR,
+  diffShapes,
+  dropShapeIndex,
+  getShapeIndex,
+  resolveClickedRun,
+  segmentDiffToGeoJSON,
+  type DiffedRun,
+} from '../gtfs/segment-graph';
 import { getRoutesForShape } from '../inspector/data';
 
 const INITIAL_CENTER: [number, number] = [14.55, 47.6];
@@ -44,6 +59,9 @@ const DIFF_COLOR_EXPR: ExpressionSpecification = [
   '#94a3b8',
 ];
 
+// Segment-level line diff uses one layer per geom_status (each with its
+// own static line-color), so no match-expression is needed here.
+
 const STYLE: maplibregl.StyleSpecification = {
   version: 8,
   sources: {
@@ -61,6 +79,10 @@ const STYLE: maplibregl.StyleSpecification = {
 interface FeedRender {
   stops: GeoJSON.FeatureCollection;
   shapes: GeoJSON.FeatureCollection;
+  /** Raw shape polylines, kept alongside the prebuilt FC for diff reuse. */
+  shapesRaw: ShapePolyline[];
+  /** `shape_id → route_ids[]` (most-tripped first). Empty if feed has no shapes. */
+  shapeToRoute: Map<string, string[]>;
   bounds: maplibregl.LngLatBoundsLike | null;
 }
 
@@ -87,7 +109,10 @@ export default function MapView() {
   const appMode = useAppStore((s) => s.mode);
   const compareFeedId = useAppStore((s) => s.compareFeedId);
   const diffStopVisibility = useAppStore((s) => s.diffStopVisibility);
+  const diffSegmentVisibility = useAppStore((s) => s.diffSegmentVisibility);
+  const setDiffSegmentSummary = useAppStore((s) => s.setDiffSegmentSummary);
   const diffStopFocus = useAppStore((s) => s.diffStopFocus);
+  const diffRouteFocus = useAppStore((s) => s.diffRouteFocus);
   const diffStatus = useDiff(
     appMode === 'diff' ? activeFeedId : null,
     appMode === 'diff' ? compareFeedId : null,
@@ -111,13 +136,16 @@ export default function MapView() {
     const pending = pendingRef.current.get(feedId);
     if (pending) return pending;
     const p = (async () => {
-      const [stops, shapes] = await Promise.all([
+      const [stops, shapes, shapeToRoute] = await Promise.all([
         fetchStops(feedId),
         fetchShapes(feedId),
+        fetchShapeRouteMap(feedId),
       ]);
       const entry: FeedRender = {
         stops: stopsToGeoJSON(stops),
         shapes: shapesToGeoJSON(shapes),
+        shapesRaw: shapes,
+        shapeToRoute,
         bounds: stops.length > 0 ? boundsOfStops(stops) : null,
       };
       cacheRef.current.set(feedId, entry);
@@ -141,6 +169,7 @@ export default function MapView() {
       map.addSource('stops', { type: 'geojson', data: emptyFC() });
       map.addSource('shapes', { type: 'geojson', data: emptyFC() });
       map.addSource('registry-focus', { type: 'geojson', data: emptyFC() });
+      map.addSource('diff-segments', { type: 'geojson', data: emptyFC() });
       map.addSource('diff-stops', { type: 'geojson', data: emptyFC() });
       map.addSource('diff-ghost', { type: 'geojson', data: emptyFC() });
       map.addSource('diff-arrow', { type: 'geojson', data: emptyFC() });
@@ -152,6 +181,73 @@ export default function MapView() {
           'line-color': PRIMARY_COLOR_EXPR,
           'line-width': ['interpolate', ['linear'], ['zoom'], 8, 0.6, 14, 2.2],
           'line-opacity': 0.8,
+        },
+      });
+
+      // Segment-level line diff. We stack six layers so unchanged (dim
+      // grey) sits at the bottom, and the removed/added colored strokes get
+      // a thin dark casing beneath them. The casing makes green pop on an
+      // OSM basemap (where vivid greens would otherwise get lost in parks).
+      // All six layers are hidden in non-diff modes by the visibility
+      // effect further down.
+      map.addLayer({
+        id: 'diff-segments-unchanged-line',
+        type: 'line',
+        source: 'diff-segments',
+        filter: ['==', ['get', 'geom_status'], 'unchanged'],
+        layout: { 'line-cap': 'round', 'line-join': 'round' },
+        paint: {
+          'line-color': SEGMENT_COLOR.unchanged,
+          'line-width': ['interpolate', ['linear'], ['zoom'], 8, 0.9, 14, 2.2],
+          'line-opacity': 0.5,
+        },
+      });
+      map.addLayer({
+        id: 'diff-segments-removed-casing',
+        type: 'line',
+        source: 'diff-segments',
+        filter: ['==', ['get', 'geom_status'], 'removed'],
+        layout: { 'line-cap': 'round', 'line-join': 'round' },
+        paint: {
+          'line-color': '#1a1f2b',
+          'line-width': ['interpolate', ['linear'], ['zoom'], 8, 3.2, 14, 6.5],
+          'line-opacity': 0.9,
+        },
+      });
+      map.addLayer({
+        id: 'diff-segments-removed-line',
+        type: 'line',
+        source: 'diff-segments',
+        filter: ['==', ['get', 'geom_status'], 'removed'],
+        layout: { 'line-cap': 'round', 'line-join': 'round' },
+        paint: {
+          'line-color': SEGMENT_COLOR.removed,
+          'line-width': ['interpolate', ['linear'], ['zoom'], 8, 2.0, 14, 4.5],
+          'line-opacity': 0.95,
+        },
+      });
+      map.addLayer({
+        id: 'diff-segments-added-casing',
+        type: 'line',
+        source: 'diff-segments',
+        filter: ['==', ['get', 'geom_status'], 'added'],
+        layout: { 'line-cap': 'round', 'line-join': 'round' },
+        paint: {
+          'line-color': '#1a1f2b',
+          'line-width': ['interpolate', ['linear'], ['zoom'], 8, 3.2, 14, 6.5],
+          'line-opacity': 0.9,
+        },
+      });
+      map.addLayer({
+        id: 'diff-segments-added-line',
+        type: 'line',
+        source: 'diff-segments',
+        filter: ['==', ['get', 'geom_status'], 'added'],
+        layout: { 'line-cap': 'round', 'line-join': 'round' },
+        paint: {
+          'line-color': SEGMENT_COLOR.added,
+          'line-width': ['interpolate', ['linear'], ['zoom'], 8, 2.0, 14, 4.5],
+          'line-opacity': 0.95,
         },
       });
       map.addLayer({
@@ -235,6 +331,40 @@ export default function MapView() {
         useAppStore.getState().setDiffStopFocus(canonicalId);
       });
 
+      // Diff segment → route focus. Each run feature carries its
+      // originating feed ('a' | 'b') and its shape_id verbatim, so we
+      // resolve shape → route → canonical route directly without any
+      // ambiguity about which feed's registry to look in.
+      for (const layerId of [
+        'diff-segments-added-line',
+        'diff-segments-removed-line',
+        'diff-segments-unchanged-line',
+      ]) {
+        map.on('mouseenter', layerId, () => {
+          map.getCanvas().style.cursor = 'pointer';
+        });
+        map.on('mouseleave', layerId, () => {
+          map.getCanvas().style.cursor = '';
+        });
+        map.on('click', layerId, (evt) => {
+          const f = evt.features?.[0];
+          if (!f) return;
+          const st = useAppStore.getState();
+          const a = st.activeFeedId;
+          const b = st.compareFeedId;
+          if (!a || !b) return;
+          const pick = resolveClickedRun(f.properties ?? {}, a, b);
+          if (!pick) return;
+          getRoutesForShape(pick.feedId, pick.shapeId)
+            .then((routeIds) => {
+              if (routeIds.length === 0) return;
+              const canonical = lookupRoute(pick.feedId, routeIds[0])?.canonicalId ?? null;
+              if (canonical) useAppStore.getState().setDiffRouteFocus(canonical);
+            })
+            .catch((err) => console.warn('segment → route resolve failed', err));
+        });
+      }
+
       map.on('mouseenter', 'stops-circle', () => {
         map.getCanvas().style.cursor = 'pointer';
       });
@@ -296,7 +426,14 @@ export default function MapView() {
 
       map.on('click', (evt) => {
         const hit = map.queryRenderedFeatures(evt.point, {
-          layers: ['stops-circle', 'shapes-line', 'diff-stops-circle'],
+          layers: [
+            'stops-circle',
+            'shapes-line',
+            'diff-stops-circle',
+            'diff-segments-added-line',
+            'diff-segments-removed-line',
+            'diff-segments-unchanged-line',
+          ],
         });
         if (hit.length === 0) {
           clearInspector();
@@ -377,11 +514,16 @@ export default function MapView() {
     };
   }, [ready, feedOrder, ensureFeedRender]);
 
-  // Drop cache entries for feeds the user has removed.
+  // Drop cache entries for feeds the user has removed. Also evict the
+  // segment-graph cache so a later re-ingest of the same id doesn't
+  // reuse stale geometry.
   useEffect(() => {
     const valid = new Set(feedOrder);
     for (const key of [...cacheRef.current.keys()]) {
-      if (!valid.has(key)) cacheRef.current.delete(key);
+      if (!valid.has(key)) {
+        cacheRef.current.delete(key);
+        dropShapeIndex(key);
+      }
     }
     for (const key of [...pendingRef.current.keys()]) {
       if (!valid.has(key)) pendingRef.current.delete(key);
@@ -399,6 +541,11 @@ export default function MapView() {
     map.setLayoutProperty('stops-circle', 'visibility', showStops ? 'visible' : 'none');
     map.setFilter('stops-circle', modeFilter);
     map.setFilter('shapes-line', modeFilter);
+
+    // Segment diff layers keep only their geom_status predicate here —
+    // mode filtering is applied at GeoJSON emit time (see the `accept`
+    // in the diff-segments effect) so the sidebar length totals stay
+    // consistent with what's actually drawn.
   }, [showStops, modeVisibility, ready]);
 
   // Drive the canonical-entity focus halo.
@@ -430,22 +577,100 @@ export default function MapView() {
     map.flyTo({ center: [lon, lat], zoom: Math.max(map.getZoom(), 13), duration: 700 });
   }, [registryFocus, ready, registrySnapshot]);
 
-  // Populate / clear diff overlay sources.
+  // Populate / clear diff overlay sources. Stop overlays are synchronous
+  // (already in the diff result); shape overlays join registry route ids
+  // against cached per-feed shape data, which may still be loading for one
+  // of the two feeds — we run it as an effect that re-runs on every input
+  // and cancels stale work.
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready) return;
-    if (diffStatus.kind === 'ready') {
-      setSource(map, 'diff-stops', diffStopPoints(diffStatus.result, diffStopVisibility));
-      setSource(map, 'diff-ghost', diffStopGhosts(diffStatus.result, diffStopVisibility));
-      setSource(map, 'diff-arrow', diffMoveArrows(diffStatus.result, diffStopVisibility));
-    } else {
+    if (diffStatus.kind !== 'ready') {
       setSource(map, 'diff-stops', emptyFC());
       setSource(map, 'diff-ghost', emptyFC());
       setSource(map, 'diff-arrow', emptyFC());
+      return;
     }
+    setSource(map, 'diff-stops', diffStopPoints(diffStatus.result, diffStopVisibility));
+    setSource(map, 'diff-ghost', diffStopGhosts(diffStatus.result, diffStopVisibility));
+    setSource(map, 'diff-arrow', diffMoveArrows(diffStatus.result, diffStopVisibility));
   }, [diffStatus, diffStopVisibility, ready]);
 
-  // In diff mode: hide per-feed stops and dim shapes so the overlay pops.
+  // Build the segment-level geometry diff between the two feeds' shapes.
+  // Each feed is indexed by its line segments; every vertex of the
+  // other feed is tested against that index with a point-to-segment
+  // distance so we can tell "is this bit of A also in B?" without
+  // fabricating any new geometry. Runs of consecutive same-class
+  // vertices are emitted as LineStrings using the original shape
+  // vertices verbatim.
+  //
+  // Mode filtering is applied at GeoJSON emit time (via `accept`) so the
+  // sidebar length totals move in lock-step with the mode toggles.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    if (diffStatus.kind !== 'ready') {
+      setSource(map, 'diff-segments', emptyFC());
+      setDiffSegmentSummary(null);
+      return;
+    }
+    let cancelled = false;
+    const feedA = diffStatus.feedA;
+    const feedB = diffStatus.feedB;
+    const activeModes = new Set(MODES.filter((m) => modeVisibility[m]));
+    const accept = (r: DiffedRun) => {
+      const modes = r.modes.length ? r.modes : (['other'] as Mode[]);
+      return modes.some((m) => activeModes.has(m));
+    };
+    (async () => {
+      try {
+        const [idxA, idxB] = await Promise.all([
+          getShapeIndex(feedA),
+          getShapeIndex(feedB),
+        ]);
+        if (cancelled) return;
+        const t0 = performance.now();
+        const diffed = diffShapes(idxA, idxB);
+        const { features, lengths } = segmentDiffToGeoJSON(
+          diffed,
+          diffSegmentVisibility,
+          accept,
+        );
+        if (cancelled) return;
+        const dtMs = Math.round(performance.now() - t0);
+        console.info('[diff-segments] built', {
+          feedA,
+          feedB,
+          segmentsA: idxA.segmentCount,
+          segmentsB: idxB.segmentCount,
+          runs: diffed.runs.length,
+          features: features.features.length,
+          lengthsKm: {
+            added: Math.round(lengths.added / 1000),
+            removed: Math.round(lengths.removed / 1000),
+            unchanged: Math.round(lengths.unchanged / 1000),
+          },
+          dtMs,
+        });
+        setSource(map, 'diff-segments', features);
+        setDiffSegmentSummary({ feedA, feedB, lengths });
+      } catch (err) {
+        if (!cancelled) console.warn('diff-segments build failed', err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    diffStatus,
+    diffSegmentVisibility,
+    modeVisibility,
+    ready,
+    setDiffSegmentSummary,
+  ]);
+
+  // In diff mode: hide per-feed stops, hide base shapes entirely, and show
+  // the diff polyline + dot overlays instead.
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready) return;
@@ -455,22 +680,29 @@ export default function MapView() {
       'visibility',
       !showDiffOverlay && showStops ? 'visible' : 'none',
     );
-    map.setPaintProperty(
+    // The base shapes layer would duplicate (and recolor) the diff polylines
+    // in diff mode, so we hide it completely rather than just dimming it.
+    map.setLayoutProperty(
       'shapes-line',
-      'line-opacity',
-      showDiffOverlay ? 0.25 : 0.8,
+      'visibility',
+      showDiffOverlay ? 'none' : 'visible',
     );
-    const diffVis: maplibregl.CircleLayerSpecification['layout'] = {
-      visibility: showDiffOverlay ? 'visible' : 'none',
-    };
-    map.setLayoutProperty('diff-stops-circle', 'visibility', diffVis.visibility!);
-    map.setLayoutProperty('diff-ghost-circle', 'visibility', diffVis.visibility!);
-    map.setLayoutProperty('diff-arrow-line', 'visibility', diffVis.visibility!);
+    const vis = showDiffOverlay ? 'visible' : 'none';
+    map.setLayoutProperty('diff-stops-circle', 'visibility', vis);
+    map.setLayoutProperty('diff-ghost-circle', 'visibility', vis);
+    map.setLayoutProperty('diff-arrow-line', 'visibility', vis);
+    for (const id of [
+      'diff-segments-unchanged-line',
+      'diff-segments-removed-casing',
+      'diff-segments-removed-line',
+      'diff-segments-added-casing',
+      'diff-segments-added-line',
+    ]) {
+      map.setLayoutProperty(id, 'visibility', vis);
+    }
   }, [appMode, diffActive, ready, showStops]);
 
-  // Fly to the focused diff stop. Route focus is handled by the inspector
-  // panel itself — we don't zoom on line picks because routes rarely fit
-  // inside a single map tile.
+  // Fly to the focused diff stop.
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready) return;
@@ -488,6 +720,60 @@ export default function MapView() {
       duration: 600,
     });
   }, [diffStopFocus, diffStatus, ready]);
+
+  // Fit to the focused diff route's shapes across both sides. Routes rarely
+  // fit a single tile, so we fitBounds instead of flyTo, and we keep the
+  // current zoom as a ceiling so the user isn't yanked out on long lines.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    if (!diffRouteFocus || diffStatus.kind !== 'ready' || !registrySnapshot) return;
+    const entry = diffStatus.result.routes.find(
+      (e) => e.canonicalId === diffRouteFocus,
+    );
+    if (!entry) return;
+    const fromCid = entry.renumbering
+      ? entry.renumbering.fromCanonicalId
+      : entry.canonicalId;
+    const toCid = entry.renumbering
+      ? entry.renumbering.toCanonicalId
+      : entry.canonicalId;
+
+    const aRender = cacheRef.current.get(diffStatus.feedA);
+    const bRender = cacheRef.current.get(diffStatus.feedB);
+    const coords: [number, number][] = [];
+    const collect = (
+      render: FeedRender | undefined,
+      feedId: string,
+      cid: string,
+    ) => {
+      if (!render) return;
+      for (const shape of render.shapesRaw) {
+        const rids = render.shapeToRoute.get(shape.shape_id);
+        if (!rids) continue;
+        const hit = rids.some(
+          (rid) => registrySnapshot.routeAssignments[`${feedId}\t${rid}`] === cid,
+        );
+        if (hit) coords.push(...shape.coords);
+      }
+    };
+    collect(aRender, diffStatus.feedA, fromCid);
+    collect(bRender, diffStatus.feedB, toCid);
+    if (coords.length === 0) return;
+
+    let minLon = Infinity, maxLon = -Infinity, minLat = Infinity, maxLat = -Infinity;
+    for (const [lon, lat] of coords) {
+      if (lon < minLon) minLon = lon;
+      if (lon > maxLon) maxLon = lon;
+      if (lat < minLat) minLat = lat;
+      if (lat > maxLat) maxLat = lat;
+    }
+    map.fitBounds([[minLon, minLat], [maxLon, maxLat]], {
+      padding: 60,
+      duration: 600,
+      maxZoom: Math.max(map.getZoom(), 12),
+    });
+  }, [diffRouteFocus, diffStatus, registrySnapshot, ready]);
 
   return (
     <>

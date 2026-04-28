@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { MODES, type Mode } from '../gtfs/modes';
 import { removeFeedFromOPFS } from '../gtfs/opfs';
 import type { StopStatus, RouteStatus } from '../diff/engine';
+import type { GeomStatus } from '../gtfs/segment-graph';
 
 export type AppMode = 'timeline' | 'diff' | 'scenario';
 
@@ -130,6 +131,30 @@ export interface AppState {
   /** Which change categories to show on the map / in the lists. */
   diffStopVisibility: Record<StopStatus, boolean>;
   toggleDiffStopVisibility: (s: StopStatus) => void;
+  /**
+   * Lines in diff mode are compared at the geometry level (added / removed
+   * / unchanged segments), so the per-route-entity statuses from the
+   * engine (`added/removed/modified/renumbered/unchanged`) no longer map
+   * cleanly onto map visibility. We keep those available for future
+   * drawer filtering (see `diffRouteVisibility`) but the map actually
+   * renders using `diffSegmentVisibility`.
+   */
+  diffSegmentVisibility: Record<GeomStatus, boolean>;
+  toggleDiffSegmentVisibility: (s: GeomStatus) => void;
+  /**
+   * Per-status total segment length in metres, updated by the map after it
+   * builds the segment diff. Lives in the store (rather than being
+   * recomputed in the sidebar) to avoid running the expensive resample +
+   * spatial-grid pass twice.
+   */
+  diffSegmentSummary:
+    | { feedA: string; feedB: string; lengths: Record<GeomStatus, number> }
+    | null;
+  setDiffSegmentSummary: (
+    s:
+      | { feedA: string; feedB: string; lengths: Record<GeomStatus, number> }
+      | null,
+  ) => void;
   diffRouteVisibility: Record<RouteStatus, boolean>;
   toggleDiffRouteVisibility: (s: RouteStatus) => void;
   /**
@@ -285,6 +310,22 @@ export const useAppStore = create<AppState>((set) => ({
     set((st) => ({
       diffRouteVisibility: { ...st.diffRouteVisibility, [s]: !st.diffRouteVisibility[s] },
     })),
+  diffSegmentVisibility: {
+    added: true,
+    removed: true,
+    // Unchanged segments are the network background — on by default so the
+    // user sees *where* the new/removed bits attach to the existing network.
+    unchanged: true,
+  },
+  toggleDiffSegmentVisibility: (s) =>
+    set((st) => ({
+      diffSegmentVisibility: {
+        ...st.diffSegmentVisibility,
+        [s]: !st.diffSegmentVisibility[s],
+      },
+    })),
+  diffSegmentSummary: null,
+  setDiffSegmentSummary: (diffSegmentSummary) => set({ diffSegmentSummary }),
   diffStopFocus: null,
   diffRouteFocus: null,
   setDiffStopFocus: (diffStopFocus) => set({ diffStopFocus }),

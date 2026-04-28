@@ -33,6 +33,11 @@ export function ensureFeedTablesLoaded(feedId: string): Promise<void> {
   return p;
 }
 
+// Tables we consider mandatory for a feed to be usable. Missing `stops` is
+// fatal for registry builds, map rendering, and basically everything. Missing
+// `routes` / `trips` are almost as bad.
+const REQUIRED_STEMS = ['stops', 'routes', 'trips'] as const;
+
 async function loadFeed(feedId: string): Promise<void> {
   const { beginMapTask, endMapTask, setMapTaskLabel, feeds } = useAppStore.getState();
   const taskId = `load-${feedId}`;
@@ -40,11 +45,17 @@ async function loadFeed(feedId: string): Promise<void> {
   beginMapTask(taskId, `Loading ${label}…`);
   try {
     const stems = await listParquetStems(feedId);
-    if (stems.length > 0) {
+    const missing = REQUIRED_STEMS.filter((s) => !stems.includes(s));
+    if (stems.length > 0 && missing.length === 0) {
       setMapTaskLabel(taskId, `Restoring ${label} (parquet)…`);
       await loadFromParquet(feedId, stems);
       loaded.add(feedId);
       return;
+    }
+    if (stems.length > 0) {
+      console.warn(
+        `[feed-loader] ${feedId} parquet shards incomplete (missing: ${missing.join(', ')}); falling back to raw zip`,
+      );
     }
     const raw = await getRaw(feedId);
     if (raw) {
@@ -59,6 +70,12 @@ async function loadFeed(feedId: string): Promise<void> {
       });
       loaded.add(feedId);
       return;
+    }
+    if (stems.length > 0) {
+      throw new Error(
+        `Feed ${feedId} has incomplete Parquet shards (missing ${missing.join(', ')}) and no raw zip to re-ingest from. ` +
+          `Remove the feed and re-upload its GTFS zip.`,
+      );
     }
     throw new Error(`Feed ${feedId} has no persisted Parquet shards or raw zip`);
   } finally {

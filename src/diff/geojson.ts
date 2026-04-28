@@ -1,20 +1,19 @@
-// GeoJSON builders for diff-mode map overlays.
+// GeoJSON builders for diff-mode *stop* overlays.
 //
-// We produce three kinds of features:
-//   - dots:   one point per visible stop diff entry, at its "after" position
-//             (or "before" for entries present only on A). Colored by status.
-//   - ghosts: the "before" position of moved stops, rendered as a dimmer dot
-//             so the user can see where the stop came from.
-//   - arrows: a line from the before to the after position of moved stops.
+// Stops are classified at the entity level (added / removed / moved /
+// renamed / unchanged) via the Entity Registry — canonical identity is
+// the right granularity for point features that either exist or don't.
 //
-// The engine already normalized positions into per-side centroids; we just
-// choose which one to surface on the map.
+// Line (segment-level) diff lives in `src/gtfs/segment-graph.ts`: shapes
+// are conflated onto a shared global grid and diffed as a set of
+// undirected cell-edges. That module owns the `GeomStatus` enum and the
+// `SEGMENT_COLOR` palette; this file is intentionally stop-only now.
 
 import type { DiffResult, StopStatus, StopDiffEntry } from './engine';
 
 export const DIFF_COLOR: Record<StopStatus, string> = {
-  added: '#4ade80',    // var(--added)
-  removed: '#f87171',  // var(--removed)
+  added: '#22c55e',    // brighter than Tailwind green-400; reads well on OSM
+  removed: '#ef4444',  // red-500; more contrast than red-400
   moved: '#fbbf24',    // var(--modified)
   renamed: '#60a5fa',  // a softer accent
   unchanged: '#6b7280',

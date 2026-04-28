@@ -429,6 +429,49 @@ export async function fetchRouteDirections(
 }
 
 /**
+ * Whole-feed shape → route_id[] index. One query, one pass; used by the diff
+ * overlay to color every polyline by its route's diff status.
+ *
+ * The list per shape is sorted most-tripped-first to mirror
+ * `resolveShapeToRoutes`, which matters when a shape is shared between
+ * routes and we have to pick a canonical owner.
+ */
+export async function fetchShapeRouteMap(
+  feedId: string,
+): Promise<Map<string, string[]>> {
+  await ensureFeedTablesLoaded(feedId);
+  const conn = await getConnection();
+  try {
+    if (!(await tableExists(conn, feedId, 'trips'))) return new Map();
+    const hasShapeCol = await columnExists(conn, feedId, 'trips', 'shape_id');
+    if (!hasShapeCol) return new Map();
+    const tr = qualifiedTable(feedId, 'trips.txt');
+    const res = await conn.query(`
+      SELECT shape_id, route_id, COUNT(*)::INTEGER AS n
+      FROM ${tr}
+      WHERE shape_id IS NOT NULL
+      GROUP BY shape_id, route_id
+      ORDER BY shape_id, n DESC
+    `);
+    const out = new Map<string, string[]>();
+    for (const row of res.toArray()) {
+      const shapeId = row.shape_id == null ? '' : String(row.shape_id);
+      if (!shapeId) continue;
+      const routeId = String(row.route_id);
+      let arr = out.get(shapeId);
+      if (!arr) {
+        arr = [];
+        out.set(shapeId, arr);
+      }
+      arr.push(routeId);
+    }
+    return out;
+  } finally {
+    await conn.close();
+  }
+}
+
+/**
  * Which route_ids does a given shape_id belong to? Most feeds have one route
  * per shape, but VOR's generated shapes are occasionally shared. Ordered so
  * the most-tripped route comes first — a reasonable "pick one" default.

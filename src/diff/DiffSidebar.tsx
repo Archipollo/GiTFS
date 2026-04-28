@@ -7,7 +7,8 @@
 import { useAppStore, type FeedMeta } from '../state/app-store';
 import { useDiff } from './useDiff';
 import { DIFF_COLOR } from './geojson';
-import type { StopStatus } from './engine';
+import { SEGMENT_COLOR, type GeomStatus } from '../gtfs/segment-graph';
+import type { StopStatus, RouteStatus } from './engine';
 import { useRegistry } from '../registry/useRegistry';
 import { isRegistryStale } from '../registry/registry';
 import { stripYearSuffix, yearOfFeed } from '../timeline/math';
@@ -26,6 +27,27 @@ const STOP_STATUS_LABELS: Array<{ id: StopStatus; label: string }> = [
   { id: 'unchanged', label: 'Unchanged' },
 ];
 
+const ROUTE_STATUS_LABELS: Array<{ id: RouteStatus; label: string }> = [
+  { id: 'added', label: 'Added' },
+  { id: 'removed', label: 'Removed' },
+  { id: 'renumbered', label: 'Renumbered' },
+  { id: 'modified', label: 'Modified' },
+  { id: 'unchanged', label: 'Unchanged' },
+];
+
+const SEGMENT_STATUS_LABELS: Array<{ id: GeomStatus; label: string; hint: string }> = [
+  { id: 'added', label: 'New geometry', hint: 'Track present only in the B feed' },
+  { id: 'removed', label: 'Removed geometry', hint: 'Track present only in the A feed' },
+  { id: 'unchanged', label: 'Shared geometry', hint: 'Track present in both feeds' },
+];
+
+function formatLengthKm(meters: number): string {
+  if (meters < 1) return '0 km';
+  if (meters < 1000) return `${Math.round(meters)} m`;
+  if (meters < 10_000) return `${(meters / 1000).toFixed(1)} km`;
+  return `${Math.round(meters / 1000)} km`;
+}
+
 export default function DiffSidebar() {
   const activeFeedId = useAppStore((s) => s.activeFeedId);
   const compareFeedId = useAppStore((s) => s.compareFeedId);
@@ -34,6 +56,9 @@ export default function DiffSidebar() {
   const setCompareFeed = useAppStore((s) => s.setCompareFeed);
   const diffStopVisibility = useAppStore((s) => s.diffStopVisibility);
   const toggleDiffStopVisibility = useAppStore((s) => s.toggleDiffStopVisibility);
+  const diffSegmentVisibility = useAppStore((s) => s.diffSegmentVisibility);
+  const toggleDiffSegmentVisibility = useAppStore((s) => s.toggleDiffSegmentVisibility);
+  const diffSegmentSummary = useAppStore((s) => s.diffSegmentSummary);
 
   const registry = useRegistry();
   const diff = useDiff(activeFeedId, compareFeedId);
@@ -103,7 +128,7 @@ export default function DiffSidebar() {
 
       {diff.kind === 'ready' && (
         <>
-          <h3>Changes</h3>
+          <h3>Stops</h3>
           <div className="diff-counts">
             {STOP_STATUS_LABELS.map(({ id, label }) => {
               const n = diff.result.summary.stops[id];
@@ -123,33 +148,77 @@ export default function DiffSidebar() {
             })}
           </div>
 
-          <h3>Routes</h3>
-          <table className="diff-route-table">
-            <tbody>
-              <tr>
-                <td className="muted">Added</td>
-                <td>{diff.result.summary.routes.added}</td>
-              </tr>
-              <tr>
-                <td className="muted">Removed</td>
-                <td>{diff.result.summary.routes.removed}</td>
-              </tr>
-              <tr>
-                <td className="muted">Renumbered</td>
-                <td>{diff.result.summary.routes.renumbered}</td>
-              </tr>
-              <tr>
-                <td className="muted">Modified</td>
-                <td>{diff.result.summary.routes.modified}</td>
-              </tr>
-              <tr>
-                <td className="muted">Unchanged</td>
-                <td>{diff.result.summary.routes.unchanged}</td>
-              </tr>
-            </tbody>
-          </table>
+          <h3>Line geometry</h3>
+          <p
+            className="muted"
+            style={{ margin: '0 0 6px', fontSize: 11, lineHeight: 1.35 }}
+          >
+            Lines are compared at the segment level — shared trackage reads
+            as unchanged, only the truly different bits are highlighted.
+          </p>
+          <div className="diff-counts">
+            {SEGMENT_STATUS_LABELS.map(({ id, label, hint }) => {
+              const on = diffSegmentVisibility[id];
+              const meters = segmentLengthFor(diffSegmentSummary, diff.result.feedA, diff.result.feedB, id);
+              return (
+                <label
+                  key={id}
+                  className={`diff-count ${on ? 'on' : 'off'}`}
+                  title={hint}
+                >
+                  <input
+                    type="checkbox"
+                    checked={on}
+                    onChange={() => toggleDiffSegmentVisibility(id)}
+                  />
+                  <span
+                    className="diff-count-swatch"
+                    style={{ background: SEGMENT_COLOR[id] }}
+                  />
+                  <span className="diff-count-label">{label}</span>
+                  <span className="diff-count-n">
+                    {meters == null ? '…' : formatLengthKm(meters)}
+                  </span>
+                </label>
+              );
+            })}
+          </div>
+
+          <h3 style={{ marginTop: 14 }}>Line entities</h3>
+          <p
+            className="muted"
+            style={{ margin: '0 0 6px', fontSize: 11, lineHeight: 1.35 }}
+          >
+            Route-level classification from the Entity Registry. Shown for
+            reference; map coloring follows the geometry diff above.
+          </p>
+          <div className="diff-counts">
+            {ROUTE_STATUS_LABELS.map(({ id, label }) => {
+              const n = diff.result.summary.routes[id];
+              return (
+                <div key={id} className="diff-count on" style={{ cursor: 'default' }}>
+                  <span style={{ width: 14 }} />
+                  <span className="diff-count-label">{label}</span>
+                  <span className="diff-count-n">{n}</span>
+                </div>
+              );
+            })}
+          </div>
         </>
       )}
     </div>
   );
+}
+
+function segmentLengthFor(
+  summary:
+    | { feedA: string; feedB: string; lengths: Record<GeomStatus, number> }
+    | null,
+  feedA: string,
+  feedB: string,
+  status: GeomStatus,
+): number | null {
+  if (!summary) return null;
+  if (summary.feedA !== feedA || summary.feedB !== feedB) return null;
+  return summary.lengths[status];
 }
