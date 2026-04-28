@@ -14,7 +14,6 @@
   "dependencies": {
     "@duckdb/duckdb-wasm": "^1.29.0",
     "@zip.js/zip.js": "^2.8.26",
-    "jszip": "^3.10.1",
     "maplibre-gl": "^4.7.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
