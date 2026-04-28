@@ -1,5 +1,19 @@
 name = "gitfs"
 compatibility_date = "2026-04-28"
+main = "worker.ts"
+workers_dev = false
+preview_urls = false
+
+# gitfs.archipollo.eu must be an active Cloudflare zone.
+# Running `wrangler deploy` will create the DNS record automatically.
+[[routes]]
+pattern = "gitfs.archipollo.eu"
+custom_domain = true
 
 [assets]
 directory = "dist"
+# Serve index.html for any path that doesn't match a static file (SPA routing)
+not_found_handling = "single-page-application"
+binding = "ASSETS"
+# Always run the Worker so COOP/COEP headers are added to every response
+run_worker_first = true
