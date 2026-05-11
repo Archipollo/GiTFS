@@ -5,7 +5,7 @@ import type { StopStatus, RouteStatus } from '../diff/engine';
 import type { GeomStatus } from '../gtfs/segment-graph';
 import { yearOfFeed } from '../timeline/math';
 
-export type AppMode = 'timeline' | 'diff' | 'scenario';
+export type AppMode = 'timeline' | 'diff';
 
 export interface FeedMeta {
   id: string;

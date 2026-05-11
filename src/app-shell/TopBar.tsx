@@ -4,7 +4,6 @@ import UploadMenu from './UploadMenu';
 const MODES: { id: AppMode; label: string }[] = [
   { id: 'timeline', label: 'Timeline' },
   { id: 'diff', label: 'Diff' },
-  { id: 'scenario', label: 'Scenario' },
 ];
 
 export default function TopBar() {

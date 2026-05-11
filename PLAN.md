@@ -1,16 +1,15 @@
 # GiTFS — Plan
 
-GiTFS (Git + GTFS) is a browser-first web tool for analyzing Austrian regional GTFS feeds across three modes: Timeline (multi-year scrubber), Diff (pairwise Git-like comparison), and Scenario (edits layered on a baseline).
+GiTFS (Git + GTFS) is a browser-first web tool for analyzing Austrian regional GTFS feeds across two modes: Timeline (multi-year scrubber) and Diff (pairwise Git-like comparison).
 
-## 1. Three modes
+## 1. Two modes
 
 | Mode | Inputs | Primary UI | Question it answers |
 |---|---|---|---|
 | **Timeline** | N feeds (e.g. VOR 2020–2026) | Map + year slider + metric chart | *"Show me the network in April 2023"*, *"How did coverage evolve?"* |
 | **Diff** | Feed A vs Feed B | Map with green/red/amber overlays + text diff drawer | *"What exactly changed between 2022 and 2024?"* |
-| **Scenario** | Baseline + JSON patch | Map edit tools + auto-diff against baseline | *"If we add this line, what's the effect?"* |
 
-Switch is a tab in the top bar. All three modes share the same map, inspector, and metrics components.
+Switch is a tab in the top bar. Both modes share the same map, inspector, and metrics components.
 
 ## 2. Core technical contribution: cross-feed entity identity
 
@@ -59,21 +58,7 @@ Semantic entity-level diff on the Entity Registry IR, not text-level ID diff. Ca
 
 Map overlays green/red/amber. Right inspector shows A vs B side-by-side with changed fields highlighted. Bottom drawer: Monaco text diff over raw `.txt` files, metrics dashboard, human-readable changelog.
 
-## 6. Scenario mode
-
-Scenarios are JSON patches on a baseline feed:
-
-```json
-{ "baseline": "vor_2024",
-  "ops": [
-    {"op":"add","entity":"route","data":{...}},
-    {"op":"modify","entity":"stop","canonicalId":"...","patch":{"lat":...}},
-    {"op":"remove","entity":"trip_pattern","id":"..."} ] }
-```
-
-Applying the patch produces a synthetic feed that flows through the same diff engine. MVP edit set: add/move/remove stop, disable route, duplicate-and-modify route.
-
-## 7. Architecture
+## 6. Architecture
 
 | Concern | Choice | Alternative | Why |
 |---|---|---|---|
@@ -83,14 +68,14 @@ Applying the patch produces a synthetic feed that flows through the same diff en
 | Map | MapLibre GL JS + deck.gl | Leaflet | Vector tiles + GPU for 100k+ stops |
 | Base tiles | MapTiler / OSM via MapLibre demo tiles | Self-host | Cheapest for thesis |
 | Text diff UI | Monaco Editor diff mode | react-diff-viewer | Handles large files |
-| Persistence | OPFS (browser) + JSON export | Server DB | Shareable scenarios as files |
+| Persistence | OPFS (browser) + JSON export | Server DB | Feeds and registry survive page reload without a server |
 | Optional backend | Python + FastAPI if routing/isochrones added | — | OpenTripPlanner or r5py for travel-time |
 
 ## 8. UI layout
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│ Top bar: [Timeline | Diff | Scenario] │ feeds │ export  │
+│ Top bar: [Timeline | Diff] │ feeds │ export              │
 ├──────────────┬──────────────────────────────┬───────────┤
 │ Left panel   │                              │ Right     │
 │ • Layers     │         MAP (80% vp)         │ Inspector │
@@ -112,13 +97,11 @@ Map is always primary. Everything else docks around it and collapses.
 /feeds/
   vor_2020/raw.zip
   vor_2020/shards/*.parquet      ← built on first ingest
-  vor_2020/feed_info.json
+  vor_2020/meta.json
   ...
 /registry/
-  canonical_entities.parquet     ← cross-feed identity table
+  registry.json                  ← cross-feed canonical snapshot
   overrides.json                 ← user manual matches
-/scenarios/
-  my_scenario_1.json             ← patches, exportable
 ```
 
 Import/export as files for thesis reproducibility. No server required.
@@ -140,11 +123,7 @@ IR-level diff over registry, map color overlays, inspector A/B, Monaco text-diff
 **M5 — Metrics & longitudinal analytics (3 wks)**
 Per-region/per-route time series, coverage areas, service-hour evolution.
 
-**M6 — Scenario mode (3–4 wks)**
-Patch format, edit UI, scenario-vs-baseline diff.
 
-
-## 11. Thesis research questions (pick 2–3)
+## 11. Thesis research questions
 
 1. *How can developments of public transport systems be tracked and their impact on connectivity be visualized and measured?*
-2. *How does scenario-based diffing, grounded in historical trajectory, compare to standalone scenario planning?* 
