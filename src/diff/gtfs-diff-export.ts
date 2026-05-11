@@ -94,7 +94,6 @@ export function exportGtfsDiffV1(result: DiffResult): string {
 
     // moved and/or renamed — both sides present
     if ((stop.status === 'moved' || stop.status === 'renamed') && stop.a && stop.b) {
-      const rawId = stop.a.rawIds[0];
       const initial: Record<string, string> = {};
       const updated: Record<string, string> = {};
       if (stop.moved) {
@@ -107,7 +106,9 @@ export function exportGtfsDiffV1(result: DiffResult): string {
         initial.stop_name = stop.a.name;
         updated.stop_name = stop.b.name;
       }
-      emit('stops.txt', 'update', { stop_id: rawId }, initial, updated);
+      for (const rawId of stop.a.rawIds) {
+        emit('stops.txt', 'update', { stop_id: rawId }, initial, updated);
+      }
     }
   }
 
@@ -143,7 +144,6 @@ export function exportGtfsDiffV1(result: DiffResult): string {
     }
 
     if (route.status === 'modified' && route.a && route.b) {
-      const rawId = route.a.rawIds[0];
       const initial: Record<string, string> = {};
       const updated: Record<string, string> = {};
       if (route.a.longName !== route.b.longName) {
@@ -155,7 +155,9 @@ export function exportGtfsDiffV1(result: DiffResult): string {
         updated.agency_id = route.b.agencyName;
       }
       if (Object.keys(initial).length > 0) {
-        emit('routes.txt', 'update', { route_id: rawId }, initial, updated);
+        for (const rawId of route.a.rawIds) {
+          emit('routes.txt', 'update', { route_id: rawId }, initial, updated);
+        }
       }
       continue;
     }
