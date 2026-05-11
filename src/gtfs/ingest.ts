@@ -148,7 +148,8 @@ function pickZipEntry(entries: Entry[], name: GtfsFileName): FileEntry | null {
  * `columns` map.
  */
 function gtfsCsvReadExpr(csvVirtualPath: string): string {
-  return `read_csv_auto('${csvVirtualPath}', delim=',', quote='"', escape='"', header=true, strict_mode=false, null_padding=true, all_varchar=true)`;
+  const path = csvVirtualPath.replace(/'/g, "''");
+  return `read_csv_auto('${path}', delim=',', quote='"', escape='"', header=true, strict_mode=false, null_padding=true, all_varchar=true)`;
 }
 
 function buildCreateSql(table: string, csvVirtualPath: string, name: GtfsFileName): string {
