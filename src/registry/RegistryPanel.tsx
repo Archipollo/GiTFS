@@ -1,8 +1,8 @@
 import { useMemo, useRef, useState } from 'react';
 import { useAppStore } from '../state/app-store';
 import { useRegistry, useRegistryStale } from './useRegistry';
+import { useBuildRegistry } from './useBuildRegistry';
 import {
-  buildRegistry,
   getOverrides,
   updateOverrides,
   type RegistrySnapshot,
@@ -19,32 +19,11 @@ import type { CanonicalRoute } from './routes-matcher';
 export default function RegistryPanel() {
   const snapshot = useRegistry();
   const feedOrder = useAppStore((s) => s.feedOrder);
-  const feeds = useAppStore((s) => s.feeds);
-  const registryProgress = useAppStore((s) => s.registryProgress);
-  const setRegistryProgress = useAppStore((s) => s.setRegistryProgress);
   const stale = useRegistryStale();
 
   const [tab, setTab] = useState<'browse' | 'evaluate'>('browse');
-  const disabled = !!registryProgress || feedOrder.length === 0;
-
-  const handleBuild = async () => {
-    setRegistryProgress({ stage: 'Starting', step: 0, total: 1 });
-    try {
-      await buildRegistry((p) => {
-        setRegistryProgress({
-          stage: p.stage,
-          step: p.step,
-          total: p.total,
-          feedLabel: p.feedId ? feeds[p.feedId]?.label : undefined,
-        });
-      });
-    } catch (err) {
-      console.error('registry build failed', err);
-      alert(`Registry build failed: ${err instanceof Error ? err.message : String(err)}`);
-    } finally {
-      setRegistryProgress(null);
-    }
-  };
+  const { handleBuild, building } = useBuildRegistry();
+  const disabled = building || feedOrder.length === 0;
 
   const handleExport = () => {
     if (!snapshot) return;

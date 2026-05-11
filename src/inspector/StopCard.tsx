@@ -21,9 +21,6 @@ export default function StopCard() {
   const pinnedEntity = useAppStore((s) => s.pinnedEntity);
   const setPinnedEntity = useAppStore((s) => s.setPinnedEntity);
   const setRegistryFocus = useAppStore((s) => s.setRegistryFocus);
-  const setDrawerTab = useAppStore((s) => s.setDrawerTab);
-  const toggleDrawer = useAppStore((s) => s.toggleDrawer);
-  const drawerOpen = useAppStore((s) => s.drawerOpen);
   const registry = useRegistry();
 
   const linesState = useLinesForStop(stop?.feedId ?? null, stop?.rawId ?? null);
@@ -84,18 +81,16 @@ export default function StopCard() {
             </button>
             <button
               type="button"
-              onClick={() => {
+              onClick={() =>
                 setRegistryFocus({
                   kind: 'stop',
                   canonicalId: canonical.canonicalId,
                   lat: canonical.lat,
                   lon: canonical.lon,
-                });
-                setDrawerTab('registry');
-                if (!drawerOpen) toggleDrawer();
-              }}
+                })
+              }
             >
-              Registry
+              Focus on map
             </button>
           </div>
         </div>
