@@ -14,6 +14,9 @@ yarn-error.log*
 !.vscode/extensions.json
 !.vscode/settings.json
 
+# Local agent / IDE tooling
+.claude/
+
 # Local GTFS feed fixtures (large)
 /data/feeds/
 *.zip
@@ -22,6 +25,5 @@ yarn-error.log*
 *.tsbuildinfo
 package-lock.json
 
-# Playwright
+# Local test runner output
 test-results/
-playwright-report/

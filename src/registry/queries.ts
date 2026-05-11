@@ -84,36 +84,36 @@ export async function fetchRawRoutes(feedId: string): Promise<RawRoute[]> {
     if (hasAgency && hasAgencyId) {
       const agency = qualifiedTable(feedId, 'agency.txt');
       sql = `
-        SELECT r.route_id AS route_id,
+        SELECT ${routes}.route_id AS route_id,
                ${shortExpr} AS route_short_name,
                ${longExpr}  AS route_long_name,
-               r.${agencyIdExpr} AS agency_id,
+               ${routes}.agency_id AS agency_id,
                a.agency_name AS agency_name,
-               TRY_CAST(r.route_type AS INTEGER) AS route_type
-        FROM ${routes} r
-        LEFT JOIN ${agency} a ON a.agency_id = r.agency_id
+               TRY_CAST(${routes}.route_type AS INTEGER) AS route_type
+        FROM ${routes}
+        LEFT JOIN ${agency} a ON a.agency_id = ${routes}.agency_id
       `;
     } else if (hasAgency) {
       // Single-agency feed — pick the only agency row.
       const agency = qualifiedTable(feedId, 'agency.txt');
       sql = `
-        SELECT r.route_id AS route_id,
+        SELECT route_id AS route_id,
                ${shortExpr} AS route_short_name,
                ${longExpr}  AS route_long_name,
                ${agencyIdExpr} AS agency_id,
                (SELECT agency_name FROM ${agency} LIMIT 1) AS agency_name,
-               TRY_CAST(r.route_type AS INTEGER) AS route_type
-        FROM ${routes} r
+               TRY_CAST(route_type AS INTEGER) AS route_type
+        FROM ${routes}
       `;
     } else {
       sql = `
-        SELECT r.route_id AS route_id,
+        SELECT route_id AS route_id,
                ${shortExpr} AS route_short_name,
                ${longExpr}  AS route_long_name,
                ${agencyIdExpr} AS agency_id,
                NULL AS agency_name,
-               TRY_CAST(r.route_type AS INTEGER) AS route_type
-        FROM ${routes} r
+               TRY_CAST(route_type AS INTEGER) AS route_type
+        FROM ${routes}
       `;
     }
 
