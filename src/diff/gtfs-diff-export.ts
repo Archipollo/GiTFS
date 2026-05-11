@@ -14,8 +14,8 @@ import type { Mode } from '../gtfs/modes';
 function csvField(v: string | object | null | undefined): string {
   if (v === null || v === undefined) return '';
   const s = typeof v === 'object' ? JSON.stringify(v) : String(v);
-  // Always quote JSON objects; also quote strings containing commas/quotes/newlines.
-  if (typeof v === 'object' || s.includes(',') || s.includes('"') || s.includes('\n')) {
+  // Always quote JSON objects; also quote strings containing commas/quotes/newlines/carriage returns.
+  if (typeof v === 'object' || s.includes(',') || s.includes('"') || s.includes('\n') || s.includes('\r')) {
     return `"${s.replace(/"/g, '""')}"`;
   }
   return s;
