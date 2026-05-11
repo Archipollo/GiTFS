@@ -1,7 +1,7 @@
 import { useAppStore } from '../state/app-store';
 import { MODES, MODE_COLOR, MODE_LABEL } from '../gtfs/modes';
 import { formatGtfsDate, stripYearSuffix, yearOfFeed } from '../timeline/math';
-import DiffSidebar from '../diff/DiffSidebar';
+import { DiffSidebar } from '../diff/DiffSidebar';
 
 export default function LeftPanel() {
   const mode = useAppStore((s) => s.mode);
@@ -10,7 +10,6 @@ export default function LeftPanel() {
   const activeFeedId = useAppStore((s) => s.activeFeedId);
   const compareFeedId = useAppStore((s) => s.compareFeedId);
   const setActive = useAppStore((s) => s.setActiveFeed);
-  const setCompare = useAppStore((s) => s.setCompareFeed);
   const removeFeed = useAppStore((s) => s.removeFeed);
   const setTimelineYear = useAppStore((s) => s.setTimelineYear);
 
@@ -21,6 +20,10 @@ export default function LeftPanel() {
       if (meta) setTimelineYear(yearOfFeed(meta).year);
     }
   };
+
+  const sortedFeedOrder = [...feedOrder].sort(
+    (a, b) => yearOfFeed(feeds[a]).year - yearOfFeed(feeds[b]).year,
+  );
 
   const showStops = useAppStore((s) => s.showStops);
   const setShowStops = useAppStore((s) => s.setShowStops);
@@ -33,7 +36,7 @@ export default function LeftPanel() {
       {feedOrder.length === 0 && (
         <p className="muted">Load a GTFS zip to begin.</p>
       )}
-      {feedOrder.map((id) => {
+      {sortedFeedOrder.map((id) => {
         const f = feeds[id];
         const isActive = id === activeFeedId;
         const isCompare = id === compareFeedId;
@@ -77,26 +80,13 @@ export default function LeftPanel() {
               </div>
             </div>
             <div style={{ display: 'flex', gap: 4 }}>
-              <button
-                title="Set as active"
-                onClick={() => pickActive(id)}
-                style={{ padding: '2px 6px', fontSize: 11 }}
-              >
-                {isActive ? 'A*' : 'A'}
-              </button>
-              {mode === 'diff' && (
+              {mode !== 'diff' && (
                 <button
-                  title="Set as compare"
-                  onClick={() => setCompare(isCompare ? null : id)}
-                  disabled={isActive}
-                  style={{
-                    padding: '2px 6px',
-                    fontSize: 11,
-                    borderColor: isCompare ? 'var(--modified)' : undefined,
-                    opacity: isActive ? 0.55 : 1,
-                  }}
+                  title="Set as active"
+                  onClick={() => pickActive(id)}
+                  style={{ padding: '2px 6px', fontSize: 11 }}
                 >
-                  {isCompare ? 'B*' : 'B'}
+                  {isActive ? 'A*' : 'A'}
                 </button>
               )}
               <button

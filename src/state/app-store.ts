@@ -88,9 +88,6 @@ export interface AppState {
   setInspectorRoute: (ref: RouteInspectorRef | null) => void;
   clearInspector: () => void;
 
-  drawerOpen: boolean;
-  toggleDrawer: () => void;
-
   ingesting: { id: string; progress: string } | null;
   setIngesting: (v: AppState['ingesting']) => void;
 
@@ -110,10 +107,6 @@ export interface AppState {
   // Registry build progress (null = idle).
   registryProgress: RegistryProgress | null;
   setRegistryProgress: (p: RegistryProgress | null) => void;
-
-  // Drawer
-  drawerTab: 'registry' | 'metrics' | 'diff' | 'changelog';
-  setDrawerTab: (t: AppState['drawerTab']) => void;
 
   // Registry focus: a selected canonical entity to highlight on the map.
   registryFocus: RegistryFocus | null;
@@ -266,9 +259,6 @@ export const useAppStore = create<AppState>((set) => ({
   setInspectorRoute: (inspectorRoute) => set({ inspectorRoute }),
   clearInspector: () => set({ inspectorStop: null, inspectorRoute: null }),
 
-  drawerOpen: false,
-  toggleDrawer: () => set((s) => ({ drawerOpen: !s.drawerOpen })),
-
   ingesting: null,
   setIngesting: (v) => set({ ingesting: v }),
 
@@ -294,9 +284,6 @@ export const useAppStore = create<AppState>((set) => ({
 
   registryProgress: null,
   setRegistryProgress: (p) => set({ registryProgress: p }),
-
-  drawerTab: 'registry',
-  setDrawerTab: (drawerTab) => set({ drawerTab }),
 
   registryFocus: null,
   setRegistryFocus: (registryFocus) => set({ registryFocus }),

@@ -5,7 +5,13 @@ import StopCard from '../inspector/StopCard';
 import RouteCard from '../inspector/RouteCard';
 import { formatGtfsDate, stripYearSuffix, yearOfFeed } from '../timeline/math';
 
-export default function RightPanel() {
+interface RightPanelProps {
+  visible: boolean;
+  onToggle: () => void;
+  onResizeStart: (e: React.MouseEvent) => void;
+}
+
+export default function RightPanel({ visible, onToggle, onResizeStart }: RightPanelProps) {
   const mode = useAppStore((s) => s.mode);
   const activeFeedId = useAppStore((s) => s.activeFeedId);
   const feed = useAppStore((s) => (activeFeedId ? s.feeds[activeFeedId] : null));
@@ -13,29 +19,33 @@ export default function RightPanel() {
   const route = useAppStore((s) => s.inspectorRoute);
   const pinnedEntity = useAppStore((s) => s.pinnedEntity);
 
-  if (mode === 'diff') {
-    return (
-      <aside className="panel right">
-        <DiffInspector />
-      </aside>
-    );
-  }
-
-  const hasSelection = Boolean(stop || route);
-
   return (
-    <aside className="panel right">
-      <h3>Inspector</h3>
-      {pinnedEntity && <PinnedEntityView />}
+    <aside className={`panel right right-panel${visible ? '' : ' right-panel--collapsed'}`}>
+      <div className="right-panel-resize-handle" onMouseDown={onResizeStart} />
+      <button
+        className="right-panel-toggle"
+        onClick={onToggle}
+        title={visible ? 'Hide inspector' : 'Show inspector'}
+      >
+        {visible ? '›' : '‹'}
+      </button>
 
-      {stop && <StopCard />}
-      {route && <RouteCard />}
-
-      {!hasSelection && !pinnedEntity && feed && (
-        <FeedSummary />
+      {visible && (
+        <div className="right-panel-content">
+          {mode === 'diff' ? (
+            <DiffInspector />
+          ) : (
+            <>
+              <h3>Inspector</h3>
+              {pinnedEntity && <PinnedEntityView />}
+              {stop && <StopCard />}
+              {route && <RouteCard />}
+              {!stop && !route && !pinnedEntity && feed && <FeedSummary />}
+              {!feed && !pinnedEntity && <p className="muted">No feed selected.</p>}
+            </>
+          )}
+        </div>
       )}
-
-      {!feed && !pinnedEntity && <p className="muted">No feed selected.</p>}
     </aside>
   );
 }
