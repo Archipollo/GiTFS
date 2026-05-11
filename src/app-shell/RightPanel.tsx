@@ -1,3 +1,4 @@
+import type { MouseEvent as ReactMouseEvent } from 'react';
 import { useAppStore } from '../state/app-store';
 import PinnedEntityView from '../timeline/PinnedEntityView';
 import DiffInspector from '../diff/DiffInspector';
@@ -8,7 +9,7 @@ import { formatGtfsDate, stripYearSuffix, yearOfFeed } from '../timeline/math';
 interface RightPanelProps {
   visible: boolean;
   onToggle: () => void;
-  onResizeStart: (e: React.MouseEvent) => void;
+  onResizeStart: (e: ReactMouseEvent) => void;
 }
 
 export default function RightPanel({ visible, onToggle, onResizeStart }: RightPanelProps) {

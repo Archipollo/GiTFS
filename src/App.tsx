@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useState, useCallback, useRef, type MouseEvent as ReactMouseEvent } from 'react';
 import TopBar from './app-shell/TopBar';
 import LeftPanel from './app-shell/LeftPanel';
 import RightPanel from './app-shell/RightPanel';
@@ -23,7 +23,7 @@ export default function App() {
     rehydrateRegistryOnBoot();
   }, []);
 
-  const handleResizeStart = useCallback((e: React.MouseEvent) => {
+  const handleResizeStart = useCallback((e: ReactMouseEvent) => {
     e.preventDefault();
     dragRef.current = { startX: e.clientX, startW: rightWidth };
 
