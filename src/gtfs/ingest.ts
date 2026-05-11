@@ -140,8 +140,19 @@ function pickZipEntry(entries: Entry[], name: GtfsFileName): FileEntry | null {
   return match as FileEntry;
 }
 
+/**
+ * GTFS uses comma-separated, RFC 4180–style quoting. Pin delimiter and quoting so
+ * auto-detect does not collapse the header into one column; strict_mode off + null
+ * padding tolerate real-world feeds. Use read_csv_auto (not read_csv with
+ * auto_detect=false) so column names are inferred from the header without a manual
+ * `columns` map.
+ */
+function gtfsCsvReadExpr(csvVirtualPath: string): string {
+  return `read_csv_auto('${csvVirtualPath}', delim=',', quote='"', escape='"', header=true, strict_mode=false, null_padding=true, all_varchar=true)`;
+}
+
 function buildCreateSql(table: string, csvVirtualPath: string, name: GtfsFileName): string {
-  const src = `read_csv_auto('${csvVirtualPath}', header=true, all_varchar=true)`;
+  const src = gtfsCsvReadExpr(csvVirtualPath);
   switch (name) {
     // Small tables — keep everything as varchar so downstream queries can pick
     // whichever optional columns exist (e.g. route_short_name, agency_id, stop_code).
