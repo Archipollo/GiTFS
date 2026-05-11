@@ -26,6 +26,8 @@ export default function RightPanel({ visible, onToggle, onResizeStart }: RightPa
         className="right-panel-toggle"
         onClick={onToggle}
         title={visible ? 'Hide inspector' : 'Show inspector'}
+        aria-label={visible ? 'Hide inspector' : 'Show inspector'}
+        aria-expanded={visible}
       >
         {visible ? '›' : '‹'}
       </button>
