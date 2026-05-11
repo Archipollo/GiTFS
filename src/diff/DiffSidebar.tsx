@@ -9,7 +9,7 @@ import { DIFF_COLOR } from './geojson';
 import { SEGMENT_COLOR, type GeomStatus } from '../gtfs/segment-graph';
 import type { StopStatus } from './engine';
 import { useRegistry, useRegistryStale } from '../registry/useRegistry';
-import { buildRegistry } from '../registry/registry';
+import { useBuildRegistry } from '../registry/useBuildRegistry';
 import { stripYearSuffix, yearOfFeed } from '../timeline/math';
 import { exportGtfsDiffV1 } from './gtfs-diff-export';
 
@@ -63,37 +63,15 @@ export function DiffSidebar() {
   const diffSegmentVisibility = useAppStore((s) => s.diffSegmentVisibility);
   const toggleDiffSegmentVisibility = useAppStore((s) => s.toggleDiffSegmentVisibility);
   const diffSegmentSummary = useAppStore((s) => s.diffSegmentSummary);
-  const registryProgress = useAppStore((s) => s.registryProgress);
-  const setRegistryProgress = useAppStore((s) => s.setRegistryProgress);
 
   const registry = useRegistry();
   const stale = useRegistryStale();
   const diff = useDiff(activeFeedId, compareFeedId);
+  const { handleBuild, building, registryProgress } = useBuildRegistry();
 
   const sortedFeedOrder = [...feedOrder].sort(
     (a, b) => yearOfFeed(feeds[a]).year - yearOfFeed(feeds[b]).year,
   );
-
-  const building = !!registryProgress;
-
-  const handleBuild = async () => {
-    setRegistryProgress({ stage: 'Starting', step: 0, total: 1 });
-    try {
-      await buildRegistry((p) => {
-        setRegistryProgress({
-          stage: p.stage,
-          step: p.step,
-          total: p.total,
-          feedLabel: p.feedId ? feeds[p.feedId]?.label : undefined,
-        });
-      });
-    } catch (err) {
-      console.error('registry build failed', err);
-      alert(`Registry build failed: ${err instanceof Error ? err.message : String(err)}`);
-    } finally {
-      setRegistryProgress(null);
-    }
-  };
 
   const handleExportDiff = () => {
     if (diff.kind !== 'ready') return;
