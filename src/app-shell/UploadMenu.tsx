@@ -155,7 +155,7 @@ export default function UploadMenu() {
             </span>
           </div>
           <div className="upload-menu-hint muted">
-            Pick multiple GTFS .zip files or drop them here — they'll load one after another.
+            Pick multiple GTFS .zip files or drop them here
           </div>
           {ingesting && running && (
             <div className="upload-menu-progress muted">

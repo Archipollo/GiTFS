@@ -13,7 +13,9 @@
       "PowerShell(& \"C:\\\\Program Files\\\\nodejs\\\\npm.cmd\" run dev)",
       "PowerShell(try { $r = Invoke-WebRequest -Uri \"http://localhost:5173/\" -UseBasicParsing -TimeoutSec 5; \"Status: $\\($r.StatusCode\\) - length $\\($r.Content.Length\\)\" } catch { \"Request failed: $\\($_.Exception.Message\\)\" })",
       "PowerShell(try { $r = Invoke-WebRequest -Uri \"http://localhost:5173/\" -UseBasicParsing -TimeoutSec 5; \"Status: $\\($r.StatusCode\\) length: $\\($r.Content.Length\\)\" } catch { \"FAIL: $\\($_.Exception.Message\\)\" })",
-      "PowerShell(git ls-remote https://github.com/Archipollo/GiTFS.git 2>&1)"
+      "PowerShell(git ls-remote https://github.com/Archipollo/GiTFS.git 2>&1)",
+      "Bash(gh pr *)",
+      "Bash(git rm *)"
     ]
   }
 }

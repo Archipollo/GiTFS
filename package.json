@@ -9,6 +9,7 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "typecheck": "tsc -b --noEmit",
+    "test:e2e": "playwright test",
     "deploy": "npm run build && wrangler deploy"
   },
   "dependencies": {
@@ -21,6 +22,7 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250422.0",
+    "@playwright/test": "^1.49.1",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",

@@ -21,3 +21,7 @@ yarn-error.log*
 # Build artifacts
 *.tsbuildinfo
 package-lock.json
+
+# Playwright
+test-results/
+playwright-report/
