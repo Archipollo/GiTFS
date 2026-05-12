@@ -115,6 +115,32 @@
   margin-right: auto;
 }
 
+/* Map basemap toggle (floating over map, below NavigationControl) ------ */
+
+.map-basemap-toggle {
+  position: absolute;
+  top: 106px;
+  right: 10px;
+  z-index: 5;
+  width: 29px;
+  height: 29px;
+  padding: 0;
+  background: #fff;
+  border: none;
+  border-radius: 4px;
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.1);
+  font-size: 14px;
+  line-height: 1;
+  color: #333;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.map-basemap-toggle:hover {
+  background: #f0f0f0;
+}
+
 /* Upload menu ---------------------------------------------------------- */
 
 .upload-menu {

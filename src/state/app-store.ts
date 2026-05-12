@@ -69,9 +69,14 @@ export interface PinnedEntity {
   label: string;
 }
 
+export type MapStyle = 'standard' | 'voyager' | 'dark';
+
 export interface AppState {
   mode: AppMode;
   setMode: (m: AppMode) => void;
+
+  mapStyle: MapStyle;
+  setMapStyle: (s: MapStyle) => void;
 
   feeds: Record<string, FeedMeta>;
   feedOrder: string[];
@@ -196,6 +201,9 @@ export function selectMapBusyLabel(s: AppState): string {
 }
 
 export const useAppStore = create<AppState>((set) => ({
+  mapStyle: 'standard',
+  setMapStyle: (mapStyle) => set({ mapStyle }),
+
   mode: 'timeline',
   setMode: (mode) =>
     set((s) => {
