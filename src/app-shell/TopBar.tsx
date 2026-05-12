@@ -10,7 +10,6 @@ export default function TopBar() {
   const mode = useAppStore((s) => s.mode);
   const setMode = useAppStore((s) => s.setMode);
   const feedCount = useAppStore((s) => s.feedOrder.length);
-
   return (
     <header className="topbar">
       <span className="brand">GiTFS</span>

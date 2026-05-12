@@ -65,18 +65,44 @@ const DIFF_COLOR_EXPR: ExpressionSpecification = [
 // Segment-level line diff uses one layer per geom_status (each with its
 // own static line-color), so no match-expression is needed here.
 
+const CARTO_ATTR = '© OpenStreetMap contributors, © CARTO';
+const CARTO_TILES = (style: string) => [
+  `https://a.basemaps.cartocdn.com/rastertiles/${style}/{z}/{x}/{y}.png`,
+  `https://b.basemaps.cartocdn.com/rastertiles/${style}/{z}/{x}/{y}.png`,
+  `https://c.basemaps.cartocdn.com/rastertiles/${style}/{z}/{x}/{y}.png`,
+  `https://d.basemaps.cartocdn.com/rastertiles/${style}/{z}/{x}/{y}.png`,
+];
+
 const STYLE: maplibregl.StyleSpecification = {
   version: 8,
   sources: {
-    osm: {
+    basemap_standard: {
       type: 'raster',
       tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
       tileSize: 256,
       attribution: '© OpenStreetMap contributors',
       maxzoom: 19,
     },
+    basemap_voyager: {
+      type: 'raster',
+      tiles: CARTO_TILES('voyager'),
+      tileSize: 256,
+      attribution: CARTO_ATTR,
+      maxzoom: 19,
+    },
+    basemap_dark: {
+      type: 'raster',
+      tiles: CARTO_TILES('dark_all'),
+      tileSize: 256,
+      attribution: CARTO_ATTR,
+      maxzoom: 19,
+    },
   },
-  layers: [{ id: 'osm', type: 'raster', source: 'osm' }],
+  layers: [
+    { id: 'basemap_standard', type: 'raster', source: 'basemap_standard' },
+    { id: 'basemap_voyager', type: 'raster', source: 'basemap_voyager', layout: { visibility: 'none' } },
+    { id: 'basemap_dark', type: 'raster', source: 'basemap_dark', layout: { visibility: 'none' } },
+  ],
 };
 
 interface FeedRender {
@@ -112,6 +138,7 @@ export default function MapView() {
   const pinnedEntities = useAppStore((s) => s.pinnedEntities);
 
   // Diff mode plumbing -----------------------------------------------------
+  const mapStyle = useAppStore((s) => s.mapStyle);
   const appMode = useAppStore((s) => s.mode);
   const compareFeedId = useAppStore((s) => s.compareFeedId);
   const diffStopVisibility = useAppStore((s) => s.diffStopVisibility);
@@ -187,6 +214,17 @@ export default function MapView() {
       map.addSource('diff-ghost', { type: 'geojson', data: emptyFC() });
       map.addSource('diff-arrow', { type: 'geojson', data: emptyFC() });
       map.addLayer({
+        id: 'shapes-line-casing',
+        type: 'line',
+        source: 'shapes',
+        layout: { 'line-cap': 'round', 'line-join': 'round' },
+        paint: {
+          'line-color': '#ffffff',
+          'line-width': ['interpolate', ['linear'], ['zoom'], 8, 2.5, 14, 4.5],
+          'line-opacity': 0.45,
+        },
+      });
+      map.addLayer({
         id: 'shapes-line',
         type: 'line',
         source: 'shapes',
@@ -209,9 +247,9 @@ export default function MapView() {
         filter: ['==', ['get', 'geom_status'], 'unchanged'],
         layout: { 'line-cap': 'round', 'line-join': 'round' },
         paint: {
-          'line-color': '#f8fafc',
-          'line-width': ['interpolate', ['linear'], ['zoom'], 8, 2.0, 14, 4.0],
-          'line-opacity': 0.55,
+          'line-color': '#ffffff',
+          'line-width': ['interpolate', ['linear'], ['zoom'], 8, 2.5, 14, 4.5],
+          'line-opacity': 0.40,
         },
       });
       map.addLayer({
@@ -222,8 +260,8 @@ export default function MapView() {
         layout: { 'line-cap': 'round', 'line-join': 'round' },
         paint: {
           'line-color': SEGMENT_COLOR.unchanged,
-          'line-width': ['interpolate', ['linear'], ['zoom'], 8, 1.2, 14, 2.8],
-          'line-opacity': 0.82,
+          'line-width': ['interpolate', ['linear'], ['zoom'], 8, 0.8, 14, 2.4],
+          'line-opacity': 0.75,
         },
       });
       map.addLayer({
@@ -233,9 +271,9 @@ export default function MapView() {
         filter: ['==', ['get', 'geom_status'], 'removed'],
         layout: { 'line-cap': 'round', 'line-join': 'round' },
         paint: {
-          'line-color': '#1a1f2b',
-          'line-width': ['interpolate', ['linear'], ['zoom'], 8, 3.2, 14, 6.5],
-          'line-opacity': 0.9,
+          'line-color': '#ffffff',
+          'line-width': ['interpolate', ['linear'], ['zoom'], 8, 3.0, 14, 6.0],
+          'line-opacity': 0.70,
         },
       });
       map.addLayer({
@@ -246,7 +284,7 @@ export default function MapView() {
         layout: { 'line-cap': 'round', 'line-join': 'round' },
         paint: {
           'line-color': SEGMENT_COLOR.removed,
-          'line-width': ['interpolate', ['linear'], ['zoom'], 8, 2.0, 14, 4.5],
+          'line-width': ['interpolate', ['linear'], ['zoom'], 8, 1.8, 14, 4.0],
           'line-opacity': 0.95,
         },
       });
@@ -257,9 +295,9 @@ export default function MapView() {
         filter: ['==', ['get', 'geom_status'], 'added'],
         layout: { 'line-cap': 'round', 'line-join': 'round' },
         paint: {
-          'line-color': '#1a1f2b',
-          'line-width': ['interpolate', ['linear'], ['zoom'], 8, 3.2, 14, 6.5],
-          'line-opacity': 0.9,
+          'line-color': '#ffffff',
+          'line-width': ['interpolate', ['linear'], ['zoom'], 8, 3.0, 14, 6.0],
+          'line-opacity': 0.70,
         },
       });
       map.addLayer({
@@ -270,7 +308,7 @@ export default function MapView() {
         layout: { 'line-cap': 'round', 'line-join': 'round' },
         paint: {
           'line-color': SEGMENT_COLOR.added,
-          'line-width': ['interpolate', ['linear'], ['zoom'], 8, 2.0, 14, 4.5],
+          'line-width': ['interpolate', ['linear'], ['zoom'], 8, 1.8, 14, 4.0],
           'line-opacity': 0.95,
         },
       });
@@ -338,9 +376,9 @@ export default function MapView() {
         source: 'inspector-route-stops',
         paint: {
           'circle-radius': ['interpolate', ['linear'], ['zoom'], 8, 2.5, 14, 5.5],
-          'circle-color': '#ffffff',
+          'circle-color': PRIMARY_COLOR_EXPR,
           'circle-opacity': 1,
-          'circle-stroke-color': '#1e293b',
+          'circle-stroke-color': '#ffffff',
           'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 8, 1, 14, 1.5],
         },
       });
@@ -378,9 +416,10 @@ export default function MapView() {
         paint: {
           'circle-radius': ['interpolate', ['linear'], ['zoom'], 8, 2, 14, 4],
           'circle-color': DIFF_COLOR.moved,
-          'circle-opacity': 0.35,
-          'circle-stroke-color': '#0f1115',
-          'circle-stroke-width': 0.5,
+          'circle-opacity': 0.30,
+          'circle-stroke-color': '#ffffff',
+          'circle-stroke-width': 0.8,
+          'circle-stroke-opacity': 0.35,
         },
       });
       map.addLayer({
@@ -390,12 +429,17 @@ export default function MapView() {
         paint: {
           'circle-radius': ['interpolate', ['linear'], ['zoom'], 8, 2.5, 14, 5.5],
           'circle-color': DIFF_COLOR_EXPR,
-          'circle-stroke-color': '#0f1115',
-          'circle-stroke-width': 0.5,
+          'circle-stroke-color': '#ffffff',
+          'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 8, 0.8, 14, 1.8],
           'circle-opacity': [
             'case',
             ['==', ['get', 'status'], 'unchanged'], 0.55,
             0.95,
+          ],
+          'circle-stroke-opacity': [
+            'case',
+            ['==', ['get', 'status'], 'unchanged'], 0.45,
+            0.90,
           ],
         },
       });
@@ -632,6 +676,7 @@ export default function MapView() {
 
     map.setLayoutProperty('stops-circle', 'visibility', showStops ? 'visible' : 'none');
     map.setFilter('stops-circle', modeFilter);
+    map.setFilter('shapes-line-casing', modeFilter);
     map.setFilter('shapes-line', modeFilter);
 
     // Segment diff layers keep only their geom_status predicate here —
@@ -639,6 +684,14 @@ export default function MapView() {
     // in the diff-segments effect) so the sidebar length totals stay
     // consistent with what's actually drawn.
   }, [showStops, modeVisibility, ready]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    map.setLayoutProperty('basemap_standard', 'visibility', mapStyle === 'standard' ? 'visible' : 'none');
+    map.setLayoutProperty('basemap_voyager', 'visibility', mapStyle === 'voyager' ? 'visible' : 'none');
+    map.setLayoutProperty('basemap_dark', 'visibility', mapStyle === 'dark' ? 'visible' : 'none');
+  }, [mapStyle, ready]);
 
   // Drive the canonical-entity focus halo.
   useEffect(() => {
@@ -730,6 +783,14 @@ export default function MapView() {
     if (appMode === 'diff') return;
     if (!inspectorRoute) { setSource(map, 'inspector-route-stops', emptyFC()); return; }
     let cancelled = false;
+    // Derive the route's primary mode from the first matching shape so dots
+    // are mode-colored rather than a flat white.
+    const render = cacheRef.current.get(inspectorRoute.feedId);
+    const shapeFeature = render?.shapes.features.find((f) => {
+      const sid = String(f.properties?.shape_id ?? '');
+      return render!.shapeToRoute.get(sid)?.includes(inspectorRoute.rawId) ?? false;
+    });
+    const routeMode = String(shapeFeature?.properties?.primary_mode ?? 'other');
     getRouteDirections(inspectorRoute.feedId, inspectorRoute.rawId)
       .then((directions) => {
         if (cancelled) return;
@@ -742,7 +803,7 @@ export default function MapView() {
             features.push({
               type: 'Feature',
               geometry: { type: 'Point', coordinates: [s.lon, s.lat] },
-              properties: { stop_id: s.stop_id },
+              properties: { stop_id: s.stop_id, primary_mode: routeMode },
             });
           }
         }
@@ -860,8 +921,13 @@ export default function MapView() {
       'visibility',
       !showDiffOverlay && showStops ? 'visible' : 'none',
     );
-    // The base shapes layer would duplicate (and recolor) the diff polylines
-    // in diff mode, so we hide it completely rather than just dimming it.
+    // The base shapes layers would duplicate (and recolor) the diff polylines
+    // in diff mode, so we hide them completely rather than just dimming.
+    map.setLayoutProperty(
+      'shapes-line-casing',
+      'visibility',
+      showDiffOverlay ? 'none' : 'visible',
+    );
     map.setLayoutProperty(
       'shapes-line',
       'visibility',
@@ -983,6 +1049,8 @@ export default function MapView() {
     }
 
     // Collect stops served by the focused route on both sides.
+    // Derive mode from the first collected shape so dots are mode-colored.
+    const routeMode = String(shapeFeatures[0]?.properties?.primary_mode ?? 'other');
     let cancelled = false;
     const aRawIds = (registrySnapshot.routeMembers[fromCid] ?? [])
       .filter((m) => m.feedId === diffStatus.feedA).map((m) => m.rawId);
@@ -1004,7 +1072,7 @@ export default function MapView() {
               features.push({
                 type: 'Feature',
                 geometry: { type: 'Point', coordinates: [s.lon, s.lat] },
-                properties: { stop_id: s.stop_id },
+                properties: { stop_id: s.stop_id, primary_mode: routeMode },
               });
             }
           }
@@ -1015,10 +1083,29 @@ export default function MapView() {
     return () => { cancelled = true; };
   }, [diffRouteFocus, diffStatus, registrySnapshot, ready]);
 
+  const setMapStyle = useAppStore((s) => s.setMapStyle);
+
   return (
     <>
       <div ref={containerRef} style={{ position: 'absolute', inset: 0 }} />
       <MapOverlay />
+      <button
+        className="map-basemap-toggle"
+        title={
+          mapStyle === 'standard' ? 'Switch to light map (Voyager)' :
+          mapStyle === 'voyager' ? 'Switch to dark map' :
+          'Switch to standard map'
+        }
+        onClick={() =>
+          setMapStyle(
+            mapStyle === 'standard' ? 'voyager' :
+            mapStyle === 'voyager' ? 'dark' :
+            'standard',
+          )
+        }
+      >
+        {mapStyle === 'standard' ? '◑' : mapStyle === 'voyager' ? '○' : '●'}
+      </button>
     </>
   );
 }

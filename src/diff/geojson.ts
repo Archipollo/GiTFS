@@ -12,8 +12,8 @@
 import type { DiffResult, StopStatus, StopDiffEntry } from './engine';
 
 export const DIFF_COLOR: Record<StopStatus, string> = {
-  added: '#22c55e',    // brighter than Tailwind green-400; reads well on OSM
-  removed: '#ef4444',  // red-500; more contrast than red-400
+  added: '#16a34a',    // green-600 — matches SEGMENT_COLOR.added for visual unity
+  removed: '#dc2626',  // red-600  — matches SEGMENT_COLOR.removed for visual unity
   moved: '#fbbf24',    // var(--modified)
   renamed: '#60a5fa',  // a softer accent
   unchanged: '#6b7280',
