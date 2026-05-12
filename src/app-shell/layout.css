@@ -913,11 +913,19 @@
   color: var(--fg);
 }
 .inspector-card-title {
-  font-size: 14px;
+  font-size: 16px;
   font-weight: 600;
   line-height: 1.2;
   margin-top: 2px;
   word-break: break-word;
+}
+.inspector-id-label {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--fg-dim);
+  opacity: 0.7;
+  margin-right: 4px;
 }
 .inspector-card-sub {
   font-size: 11px;

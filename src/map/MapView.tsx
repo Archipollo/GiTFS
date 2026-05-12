@@ -3,6 +3,7 @@ import maplibregl, {
   Map as MapLibreMap,
   type ExpressionSpecification,
   type FilterSpecification,
+  type PointLike,
 } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { useAppStore } from '../state/app-store';
@@ -35,7 +36,7 @@ import {
   type DiffedRun,
   type DiffedShapes,
 } from '../gtfs/segment-graph';
-import { getRoutesForShape } from '../inspector/data';
+import { getRoutesForShape, getRouteDirections } from '../inspector/data';
 
 const INITIAL_CENTER: [number, number] = [14.55, 47.6];
 const INITIAL_ZOOM = 6.5;
@@ -104,8 +105,11 @@ export default function MapView() {
   const setInspectorStop = useAppStore((s) => s.setInspectorStop);
   const setInspectorRoute = useAppStore((s) => s.setInspectorRoute);
   const clearInspector = useAppStore((s) => s.clearInspector);
+  const inspectorStop = useAppStore((s) => s.inspectorStop);
+  const inspectorRoute = useAppStore((s) => s.inspectorRoute);
   const registrySnapshot = useRegistry();
   const registryFocus = useAppStore((s) => s.registryFocus);
+  const pinnedEntities = useAppStore((s) => s.pinnedEntities);
 
   // Diff mode plumbing -----------------------------------------------------
   const appMode = useAppStore((s) => s.mode);
@@ -174,6 +178,10 @@ export default function MapView() {
       map.addSource('stops', { type: 'geojson', data: emptyFC() });
       map.addSource('shapes', { type: 'geojson', data: emptyFC() });
       map.addSource('registry-focus', { type: 'geojson', data: emptyFC() });
+      map.addSource('pinned-stops', { type: 'geojson', data: emptyFC() });
+      map.addSource('inspector-route-stops', { type: 'geojson', data: emptyFC() });
+      map.addSource('inspector-stop', { type: 'geojson', data: emptyFC() });
+      map.addSource('inspector-shape', { type: 'geojson', data: emptyFC() });
       map.addSource('diff-segments', { type: 'geojson', data: emptyFC() });
       map.addSource('diff-stops', { type: 'geojson', data: emptyFC() });
       map.addSource('diff-ghost', { type: 'geojson', data: emptyFC() });
@@ -273,8 +281,8 @@ export default function MapView() {
         paint: {
           'circle-radius': ['interpolate', ['linear'], ['zoom'], 8, 1.5, 14, 4],
           'circle-color': PRIMARY_COLOR_EXPR,
-          'circle-stroke-color': '#0f1115',
-          'circle-stroke-width': 0.5,
+          'circle-stroke-color': '#ffffff',
+          'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 8, 0.8, 14, 1.8],
           'circle-opacity': 0.9,
         },
       });
@@ -288,6 +296,64 @@ export default function MapView() {
           'circle-opacity': 0,
           'circle-stroke-color': '#fbbf24',
           'circle-stroke-width': 3,
+        },
+      });
+      map.addLayer({
+        id: 'pinned-stop-halo',
+        type: 'circle',
+        source: 'pinned-stops',
+        paint: {
+          'circle-radius': ['interpolate', ['linear'], ['zoom'], 8, 10, 14, 26],
+          'circle-color': '#ffffff',
+          'circle-opacity': 0,
+          'circle-stroke-color': '#fbbf24',
+          'circle-stroke-width': 3,
+        },
+      });
+      map.addLayer({
+        id: 'inspector-shape-casing',
+        type: 'line',
+        source: 'inspector-shape',
+        layout: { 'line-cap': 'round', 'line-join': 'round' },
+        paint: {
+          'line-color': '#ffffff',
+          'line-width': ['interpolate', ['linear'], ['zoom'], 8, 5, 14, 9],
+          'line-opacity': 0.9,
+        },
+      });
+      map.addLayer({
+        id: 'inspector-shape-line',
+        type: 'line',
+        source: 'inspector-shape',
+        layout: { 'line-cap': 'round', 'line-join': 'round' },
+        paint: {
+          'line-color': '#fbbf24',
+          'line-width': ['interpolate', ['linear'], ['zoom'], 8, 3, 14, 6],
+          'line-opacity': 0.95,
+        },
+      });
+      map.addLayer({
+        id: 'inspector-route-stops-dot',
+        type: 'circle',
+        source: 'inspector-route-stops',
+        paint: {
+          'circle-radius': ['interpolate', ['linear'], ['zoom'], 8, 2.5, 14, 5.5],
+          'circle-color': '#ffffff',
+          'circle-opacity': 1,
+          'circle-stroke-color': '#1e293b',
+          'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 8, 1, 14, 1.5],
+        },
+      });
+      map.addLayer({
+        id: 'inspector-stop-halo',
+        type: 'circle',
+        source: 'inspector-stop',
+        paint: {
+          'circle-radius': ['interpolate', ['linear'], ['zoom'], 8, 4, 14, 8],
+          'circle-color': '#fbbf24',
+          'circle-opacity': 0.9,
+          'circle-stroke-color': '#ffffff',
+          'circle-stroke-width': 2,
         },
       });
 
@@ -411,30 +477,39 @@ export default function MapView() {
         map.getCanvas().style.cursor = '';
       });
       map.on('click', 'shapes-line', (evt) => {
-        const feature = evt.features?.[0];
-        if (!feature) return;
-        const props = feature.properties ?? {};
-        const shapeId = String(props.shape_id ?? '');
         const activeId = useAppStore.getState().activeFeedId;
-        if (!activeId || !shapeId) return;
-        // Resolve shape → route_id async (cached). The inspector will stay
-        // showing its previous selection until this resolves — which is
-        // effectively instant after the first click on any shape per feed.
-        getRoutesForShape(activeId, shapeId)
-          .then((routeIds) => {
+        if (!activeId) return;
+        // Query ALL shapes at the click point (not just the topmost feature) so
+        // routes that overlap with different shape_ids are all included.
+        const bbox: [PointLike, PointLike] = [
+          [evt.point.x - 4, evt.point.y - 4],
+          [evt.point.x + 4, evt.point.y + 4],
+        ];
+        const allFeatures = map.queryRenderedFeatures(bbox, { layers: ['shapes-line'] });
+        const shapeIds = [...new Set(
+          allFeatures.map((f) => String(f.properties?.shape_id ?? '')).filter(Boolean),
+        )];
+        if (shapeIds.length === 0) return;
+        Promise.all(shapeIds.map((sid) => getRoutesForShape(activeId, sid)))
+          .then((arrays) => {
+            const seen = new Set<string>();
+            const routeIds: string[] = [];
+            for (const arr of arrays) {
+              for (const rid of arr) {
+                if (!seen.has(rid)) { seen.add(rid); routeIds.push(rid); }
+              }
+            }
             if (routeIds.length === 0) return;
-            const routeId = routeIds[0];
-            const canonical = lookupRoute(activeId, routeId)?.canonicalId ?? null;
             const appMode = useAppStore.getState().mode;
-            if (appMode === 'diff' && canonical) {
-              useAppStore.getState().setDiffRouteFocus(canonical);
+            const shapeId = shapeIds[0];
+            if (appMode === 'diff') {
+              const canonical = lookupRoute(activeId, routeIds[0])?.canonicalId ?? null;
+              if (canonical) useAppStore.getState().setDiffRouteFocus(canonical);
+            } else if (routeIds.length === 1) {
+              const canonical = lookupRoute(activeId, routeIds[0])?.canonicalId ?? null;
+              useAppStore.getState().setInspectorRoute({ feedId: activeId, rawId: routeIds[0], shapeId, canonicalId: canonical });
             } else {
-              setInspectorRoute({
-                feedId: activeId,
-                rawId: routeId,
-                shapeId,
-                canonicalId: canonical,
-              });
+              useAppStore.getState().setInspectorSegment({ feedId: activeId, shapeId, routeIds });
             }
           })
           .catch((err) => console.warn('shape→route resolve failed', err));
@@ -594,6 +669,89 @@ export default function MapView() {
     map.flyTo({ center: [lon, lat], zoom: Math.max(map.getZoom(), 13), duration: 700 });
   }, [registryFocus, ready, registrySnapshot]);
 
+  // Drive amber halo rings for all pinned entities.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    if (pinnedEntities.length === 0 || !registrySnapshot) {
+      setSource(map, 'pinned-stops', emptyFC());
+      return;
+    }
+    const features: GeoJSON.Feature[] = [];
+    for (const pin of pinnedEntities) {
+      if (pin.kind !== 'stop') continue;
+      const canon = registrySnapshot.stops[pin.canonicalId];
+      if (!canon) continue;
+      features.push({
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates: [canon.lon, canon.lat] },
+        properties: { canonicalId: pin.canonicalId },
+      });
+    }
+    setSource(map, 'pinned-stops', { type: 'FeatureCollection', features });
+  }, [pinnedEntities, registrySnapshot, ready]);
+
+  // Highlight the inspected stop with an amber ring (timeline mode only;
+  // diff mode is driven by the diffStopFocus effect below).
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    if (appMode === 'diff') return;
+    if (!inspectorStop) { setSource(map, 'inspector-stop', emptyFC()); return; }
+    const render = cacheRef.current.get(inspectorStop.feedId);
+    if (!render) { setSource(map, 'inspector-stop', emptyFC()); return; }
+    const feature = render.stops.features.find(
+      (f) => f.properties?.stop_id === inspectorStop.rawId,
+    );
+    setSource(map, 'inspector-stop', feature
+      ? { type: 'FeatureCollection', features: [feature] }
+      : emptyFC());
+  }, [inspectorStop, ready, appMode]);
+
+  // Highlight all shapes belonging to the inspected route (timeline mode only).
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    if (appMode === 'diff') return;
+    if (!inspectorRoute) { setSource(map, 'inspector-shape', emptyFC()); return; }
+    const render = cacheRef.current.get(inspectorRoute.feedId);
+    if (!render) { setSource(map, 'inspector-shape', emptyFC()); return; }
+    const features = render.shapes.features.filter((f) => {
+      const sid = String(f.properties?.shape_id ?? '');
+      return render.shapeToRoute.get(sid)?.includes(inspectorRoute.rawId) ?? false;
+    });
+    setSource(map, 'inspector-shape', { type: 'FeatureCollection', features });
+  }, [inspectorRoute, ready, appMode]);
+
+  // Highlight stops served by the inspected route (timeline mode only).
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    if (appMode === 'diff') return;
+    if (!inspectorRoute) { setSource(map, 'inspector-route-stops', emptyFC()); return; }
+    let cancelled = false;
+    getRouteDirections(inspectorRoute.feedId, inspectorRoute.rawId)
+      .then((directions) => {
+        if (cancelled) return;
+        const seen = new Set<string>();
+        const features: GeoJSON.Feature[] = [];
+        for (const dir of directions) {
+          for (const s of dir.stops) {
+            if (seen.has(s.stop_id)) continue;
+            seen.add(s.stop_id);
+            features.push({
+              type: 'Feature',
+              geometry: { type: 'Point', coordinates: [s.lon, s.lat] },
+              properties: { stop_id: s.stop_id },
+            });
+          }
+        }
+        setSource(map, 'inspector-route-stops', { type: 'FeatureCollection', features });
+      })
+      .catch((err) => console.warn('inspector-route-stops failed', err));
+    return () => { cancelled = true; };
+  }, [inspectorRoute, ready, appMode]);
+
   // Populate / clear diff overlay sources. Stop overlays are synchronous
   // (already in the diff result); shape overlays join registry route ids
   // against cached per-feed shape data, which may still be loading for one
@@ -725,13 +883,16 @@ export default function MapView() {
     }
   }, [appMode, diffActive, ready, showStops]);
 
-  // Fly to the focused diff stop.
+  // Fly to and highlight the focused diff stop (amber halo, same as timeline mode).
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready) return;
-    if (!diffStopFocus || diffStatus.kind !== 'ready') return;
+    if (!diffStopFocus || diffStatus.kind !== 'ready') {
+      setSource(map, 'inspector-stop', emptyFC());
+      return;
+    }
     const entry = diffStatus.result.stops.find((e) => e.canonicalId === diffStopFocus);
-    if (!entry) return;
+    if (!entry) { setSource(map, 'inspector-stop', emptyFC()); return; }
     const coord = entry.b
       ? [entry.b.lon, entry.b.lat]
       : entry.a
@@ -742,19 +903,33 @@ export default function MapView() {
       zoom: Math.max(map.getZoom(), 14),
       duration: 600,
     });
+    setSource(map, 'inspector-stop', {
+      type: 'FeatureCollection',
+      features: [{
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates: coord },
+        properties: {},
+      }],
+    });
   }, [diffStopFocus, diffStatus, ready]);
 
-  // Fit to the focused diff route's shapes across both sides. Routes rarely
-  // fit a single tile, so we fitBounds instead of flyTo, and we keep the
-  // current zoom as a ceiling so the user isn't yanked out on long lines.
+  // Highlight shapes from both feeds and fit bounds for the focused diff route.
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready) return;
-    if (!diffRouteFocus || diffStatus.kind !== 'ready' || !registrySnapshot) return;
+    if (!diffRouteFocus || diffStatus.kind !== 'ready' || !registrySnapshot) {
+      setSource(map, 'inspector-shape', emptyFC());
+      setSource(map, 'inspector-route-stops', emptyFC());
+      return;
+    }
     const entry = diffStatus.result.routes.find(
       (e) => e.canonicalId === diffRouteFocus,
     );
-    if (!entry) return;
+    if (!entry) {
+      setSource(map, 'inspector-shape', emptyFC());
+      setSource(map, 'inspector-route-stops', emptyFC());
+      return;
+    }
     const fromCid = entry.renumbering
       ? entry.renumbering.fromCanonicalId
       : entry.canonicalId;
@@ -765,7 +940,8 @@ export default function MapView() {
     const aRender = cacheRef.current.get(diffStatus.feedA);
     const bRender = cacheRef.current.get(diffStatus.feedB);
     const coords: [number, number][] = [];
-    const collect = (
+    const shapeFeatures: GeoJSON.Feature[] = [];
+    const collectShapes = (
       render: FeedRender | undefined,
       feedId: string,
       cid: string,
@@ -777,25 +953,66 @@ export default function MapView() {
         const hit = rids.some(
           (rid) => registrySnapshot.routeAssignments[`${feedId}\t${rid}`] === cid,
         );
-        if (hit) coords.push(...shape.coords);
+        if (!hit) continue;
+        coords.push(...shape.coords);
+        shapeFeatures.push({
+          type: 'Feature',
+          geometry: { type: 'LineString', coordinates: shape.coords },
+          properties: { shape_id: shape.shape_id },
+        });
       }
     };
-    collect(aRender, diffStatus.feedA, fromCid);
-    collect(bRender, diffStatus.feedB, toCid);
-    if (coords.length === 0) return;
+    collectShapes(aRender, diffStatus.feedA, fromCid);
+    collectShapes(bRender, diffStatus.feedB, toCid);
 
-    let minLon = Infinity, maxLon = -Infinity, minLat = Infinity, maxLat = -Infinity;
-    for (const [lon, lat] of coords) {
-      if (lon < minLon) minLon = lon;
-      if (lon > maxLon) maxLon = lon;
-      if (lat < minLat) minLat = lat;
-      if (lat > maxLat) maxLat = lat;
+    setSource(map, 'inspector-shape', { type: 'FeatureCollection', features: shapeFeatures });
+
+    if (coords.length > 0) {
+      let minLon = Infinity, maxLon = -Infinity, minLat = Infinity, maxLat = -Infinity;
+      for (const [lon, lat] of coords) {
+        if (lon < minLon) minLon = lon;
+        if (lon > maxLon) maxLon = lon;
+        if (lat < minLat) minLat = lat;
+        if (lat > maxLat) maxLat = lat;
+      }
+      map.fitBounds([[minLon, minLat], [maxLon, maxLat]], {
+        padding: 60,
+        duration: 600,
+        maxZoom: Math.max(map.getZoom(), 12),
+      });
     }
-    map.fitBounds([[minLon, minLat], [maxLon, maxLat]], {
-      padding: 60,
-      duration: 600,
-      maxZoom: Math.max(map.getZoom(), 12),
-    });
+
+    // Collect stops served by the focused route on both sides.
+    let cancelled = false;
+    const aRawIds = (registrySnapshot.routeMembers[fromCid] ?? [])
+      .filter((m) => m.feedId === diffStatus.feedA).map((m) => m.rawId);
+    const bRawIds = (registrySnapshot.routeMembers[toCid] ?? [])
+      .filter((m) => m.feedId === diffStatus.feedB).map((m) => m.rawId);
+    Promise.all([
+      ...aRawIds.map((id) => getRouteDirections(diffStatus.feedA, id)),
+      ...bRawIds.map((id) => getRouteDirections(diffStatus.feedB, id)),
+    ])
+      .then((allDirs) => {
+        if (cancelled) return;
+        const seen = new Set<string>();
+        const features: GeoJSON.Feature[] = [];
+        for (const dirs of allDirs) {
+          for (const dir of dirs) {
+            for (const s of dir.stops) {
+              if (seen.has(s.stop_id)) continue;
+              seen.add(s.stop_id);
+              features.push({
+                type: 'Feature',
+                geometry: { type: 'Point', coordinates: [s.lon, s.lat] },
+                properties: { stop_id: s.stop_id },
+              });
+            }
+          }
+        }
+        setSource(map, 'inspector-route-stops', { type: 'FeatureCollection', features });
+      })
+      .catch((err) => console.warn('diff inspector-route-stops failed', err));
+    return () => { cancelled = true; };
   }, [diffRouteFocus, diffStatus, registrySnapshot, ready]);
 
   return (
