@@ -16,7 +16,7 @@ export const MODE_LABEL: Record<Mode, string> = {
 export const MODE_COLOR: Record<Mode, string> = {
   rail: '#dc2626',
   metro: '#8b5cf6',
-  tram: '#f59e0b',
+  tram: '#16a34a',
   bus: '#2563eb',
   other: '#6b7280',
 };

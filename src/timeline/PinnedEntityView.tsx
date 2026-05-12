@@ -1,17 +1,25 @@
 import { useMemo } from 'react';
 import { useAppStore } from '../state/app-store';
 import { useRegistry } from '../registry/useRegistry';
+import type { PinnedEntity } from '../state/app-store';
 import type { RawStop } from '../registry/stops-matcher';
 import { stripYearSuffix, yearOfFeed } from './math';
 
-/**
- * Right-panel card that renders a pinned canonical entity's per-feed history.
- * The currently-active feed (driven by the timeline slider) is visually flagged
- * so the user can see which year the map is currently displaying.
- */
 export default function PinnedEntityView() {
-  const pinned = useAppStore((s) => s.pinnedEntity);
-  const setPinned = useAppStore((s) => s.setPinnedEntity);
+  const pinnedEntities = useAppStore((s) => s.pinnedEntities);
+  if (pinnedEntities.length === 0) return null;
+  return (
+    <>
+      {pinnedEntities.map((pin) => (
+        <PinnedEntityCard key={pin.canonicalId} pin={pin} />
+      ))}
+    </>
+  );
+}
+
+function PinnedEntityCard({ pin }: { pin: PinnedEntity }) {
+  const removePinnedEntity = useAppStore((s) => s.removePinnedEntity);
+  const registryFocus = useAppStore((s) => s.registryFocus);
   const setFocus = useAppStore((s) => s.setRegistryFocus);
   const feeds = useAppStore((s) => s.feeds);
   const feedOrder = useAppStore((s) => s.feedOrder);
@@ -19,20 +27,15 @@ export default function PinnedEntityView() {
   const registry = useRegistry();
 
   const rows = useMemo(() => {
-    if (!pinned || !registry) return [];
-    if (pinned.kind !== 'stop') return [];
-    const members = registry.stopMembers[pinned.canonicalId] ?? [];
+    if (!registry || pin.kind !== 'stop') return [];
+    const members = registry.stopMembers[pin.canonicalId] ?? [];
     const byFeed = new Map<string, RawStop>();
     for (const m of members) byFeed.set(m.feedId, m);
     return feedOrder.map((fid) => ({ feedId: fid, member: byFeed.get(fid) ?? null }));
-  }, [pinned, registry, feedOrder]);
+  }, [pin, registry, feedOrder]);
 
-  if (!pinned) return null;
+  const canonical = pin.kind === 'stop' && registry ? registry.stops[pin.canonicalId] : null;
 
-  const canonical =
-    pinned.kind === 'stop' && registry ? registry.stops[pinned.canonicalId] : null;
-
-  // Detect attribute drift across feeds for compact annotation.
   const nameSet = new Set<string>();
   const coordSet = new Set<string>();
   for (const r of rows) {
@@ -47,14 +50,17 @@ export default function PinnedEntityView() {
       <div className="pinned-head">
         <div>
           <div className="pinned-chip" title="Pinned entity — the timeline slider drives this history">
-            📌 {pinned.label}
+            📌 {pin.label}
           </div>
           <div className="muted" style={{ fontSize: 11, marginTop: 2, fontFamily: 'ui-monospace, monospace' }}>
-            {pinned.canonicalId}
+            {pin.canonicalId}
           </div>
         </div>
         <button
-          onClick={() => setPinned(null)}
+          onClick={() => {
+            removePinnedEntity(pin.canonicalId);
+            if (registryFocus?.canonicalId === pin.canonicalId) setFocus(null);
+          }}
           style={{ padding: '2px 8px', fontSize: 11 }}
           title="Unpin"
         >
@@ -70,7 +76,7 @@ export default function PinnedEntityView() {
             style={{ padding: '2px 6px', fontSize: 11, marginLeft: 6 }}
             onClick={() => setFocus({
               kind: 'stop',
-              canonicalId: pinned.canonicalId,
+              canonicalId: pin.canonicalId,
               lat: canonical.lat,
               lon: canonical.lon,
             })}

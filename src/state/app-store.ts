@@ -40,6 +40,13 @@ export interface RouteInspectorRef {
   canonicalId?: string | null;
 }
 
+/** All routes sharing a clicked map segment — shown in SegmentCard. */
+export interface SegmentInspectorRef {
+  feedId: string;
+  shapeId: string;
+  routeIds: string[];
+}
+
 export interface RegistryFocus {
   kind: 'stop' | 'route';
   canonicalId: string;
@@ -84,8 +91,10 @@ export interface AppState {
    */
   inspectorStop: StopInspectorRef | null;
   inspectorRoute: RouteInspectorRef | null;
+  inspectorSegment: SegmentInspectorRef | null;
   setInspectorStop: (ref: StopInspectorRef | null) => void;
   setInspectorRoute: (ref: RouteInspectorRef | null) => void;
+  setInspectorSegment: (ref: SegmentInspectorRef | null) => void;
   clearInspector: () => void;
 
   ingesting: { id: string; progress: string } | null;
@@ -117,9 +126,10 @@ export interface AppState {
   timelineYear: number | null;
   setTimelineYear: (year: number | null) => void;
 
-  /** A pinned canonical entity whose history is shown in the inspector across years. */
-  pinnedEntity: PinnedEntity | null;
-  setPinnedEntity: (p: PinnedEntity | null) => void;
+  /** Pinned canonical entities whose histories are shown in the inspector across years. */
+  pinnedEntities: PinnedEntity[];
+  addPinnedEntity: (p: PinnedEntity) => void;
+  removePinnedEntity: (canonicalId: string) => void;
 
   // Diff mode ---------------------------------------------------------------
   /** Which change categories to show on the map / in the lists. */
@@ -255,9 +265,11 @@ export const useAppStore = create<AppState>((set) => ({
     })),
   inspectorStop: null,
   inspectorRoute: null,
-  setInspectorStop: (inspectorStop) => set({ inspectorStop }),
-  setInspectorRoute: (inspectorRoute) => set({ inspectorRoute }),
-  clearInspector: () => set({ inspectorStop: null, inspectorRoute: null }),
+  inspectorSegment: null,
+  setInspectorStop: (inspectorStop) => set({ inspectorStop, inspectorSegment: null }),
+  setInspectorRoute: (inspectorRoute) => set({ inspectorRoute, inspectorSegment: null }),
+  setInspectorSegment: (inspectorSegment) => set({ inspectorSegment, inspectorRoute: null }),
+  clearInspector: () => set({ inspectorStop: null, inspectorRoute: null, inspectorSegment: null }),
 
   ingesting: null,
   setIngesting: (v) => set({ ingesting: v }),
@@ -291,8 +303,15 @@ export const useAppStore = create<AppState>((set) => ({
   timelineYear: null,
   setTimelineYear: (timelineYear) => set({ timelineYear }),
 
-  pinnedEntity: null,
-  setPinnedEntity: (pinnedEntity) => set({ pinnedEntity }),
+  pinnedEntities: [],
+  addPinnedEntity: (p) =>
+    set((s) => ({
+      pinnedEntities: s.pinnedEntities.some((e) => e.canonicalId === p.canonicalId)
+        ? s.pinnedEntities
+        : [...s.pinnedEntities, p],
+    })),
+  removePinnedEntity: (canonicalId) =>
+    set((s) => ({ pinnedEntities: s.pinnedEntities.filter((e) => e.canonicalId !== canonicalId) })),
 
   diffStopVisibility: {
     added: true,

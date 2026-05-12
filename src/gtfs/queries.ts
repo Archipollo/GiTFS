@@ -499,3 +499,78 @@ export async function resolveShapeToRoutes(
     await conn.close();
   }
 }
+
+/**
+ * Basic metadata for a list of route_ids. Returns the same `LineForStop`
+ * shape as `fetchLinesForStop` so callers can reuse `LinePill` directly.
+ * `trip_count` is the total trips for each route (not stop-specific).
+ */
+export async function fetchRouteMetas(
+  feedId: string,
+  routeIds: string[],
+): Promise<LineForStop[]> {
+  if (routeIds.length === 0) return [];
+  await ensureFeedTablesLoaded(feedId);
+  const conn = await getConnection();
+  try {
+    const hasRoutes = await tableExists(conn, feedId, 'routes');
+    const hasTrips = await tableExists(conn, feedId, 'trips');
+    if (!hasRoutes) return [];
+    const hasAgency = await tableExists(conn, feedId, 'agency');
+    const hasAgencyId = await columnExists(conn, feedId, 'routes', 'agency_id');
+    const hasShort = await columnExists(conn, feedId, 'routes', 'route_short_name');
+    const hasLong = await columnExists(conn, feedId, 'routes', 'route_long_name');
+
+    const rt = qualifiedTable(feedId, 'routes.txt');
+    const agencyJoin =
+      hasAgency && hasAgencyId
+        ? `LEFT JOIN ${qualifiedTable(feedId, 'agency.txt')} a ON a.agency_id = r.agency_id`
+        : hasAgency
+          ? `LEFT JOIN ${qualifiedTable(feedId, 'agency.txt')} a ON TRUE`
+          : '';
+    const agencyExpr = hasAgency ? 'a.agency_name' : 'NULL';
+    const shortExpr = hasShort ? 'r.route_short_name' : 'NULL';
+    const longExpr = hasLong ? 'r.route_long_name' : 'NULL';
+
+    const tripCountExpr = hasTrips
+      ? `(SELECT COUNT(*)::INTEGER FROM ${qualifiedTable(feedId, 'trips.txt')} t WHERE t.route_id = r.route_id)`
+      : '0';
+
+    const inList = routeIds.map((id) => sqlStr(id)).join(', ');
+    const sql = `
+      SELECT r.route_id AS route_id,
+             ${shortExpr} AS route_short_name,
+             ${longExpr}  AS route_long_name,
+             ${agencyExpr} AS agency_name,
+             TRY_CAST(r.route_type AS INTEGER) AS route_type,
+             ${tripCountExpr} AS trip_count
+      FROM ${rt} r
+      ${agencyJoin}
+      WHERE r.route_id IN (${inList})
+    `;
+    const res = await conn.query(sql);
+    const rows: LineForStop[] = res.toArray().map((row) => {
+      const rtVal = row.route_type as number | null;
+      return {
+        route_id: String(row.route_id),
+        route_short_name: row.route_short_name == null ? '' : String(row.route_short_name),
+        route_long_name: row.route_long_name == null ? '' : String(row.route_long_name),
+        agency_name: row.agency_name == null ? '' : String(row.agency_name),
+        route_type: rtVal,
+        mode: classifyRouteType(rtVal),
+        trip_count: Number(row.trip_count ?? 0),
+      };
+    });
+    const modeRank: Record<Mode, number> = { rail: 0, metro: 1, tram: 2, bus: 3, other: 4 };
+    rows.sort((a, b) => {
+      const dm = modeRank[a.mode] - modeRank[b.mode];
+      if (dm !== 0) return dm;
+      const as = a.route_short_name || a.route_long_name;
+      const bs = b.route_short_name || b.route_long_name;
+      return as.localeCompare(bs, undefined, { numeric: true, sensitivity: 'base' });
+    });
+    return rows;
+  } finally {
+    await conn.close();
+  }
+}

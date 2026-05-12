@@ -18,8 +18,9 @@ export default function StopCard() {
   const setInspectorStop = useAppStore((s) => s.setInspectorStop);
   const route = useAppStore((s) => s.inspectorRoute);
   const setInspectorRoute = useAppStore((s) => s.setInspectorRoute);
-  const pinnedEntity = useAppStore((s) => s.pinnedEntity);
-  const setPinnedEntity = useAppStore((s) => s.setPinnedEntity);
+  const pinnedEntities = useAppStore((s) => s.pinnedEntities);
+  const addPinnedEntity = useAppStore((s) => s.addPinnedEntity);
+  const removePinnedEntity = useAppStore((s) => s.removePinnedEntity);
   const setRegistryFocus = useAppStore((s) => s.setRegistryFocus);
   const registry = useRegistry();
 
@@ -30,7 +31,7 @@ export default function StopCard() {
   const canonical =
     stop.canonicalId && registry ? registry.stops[stop.canonicalId] ?? null : null;
   const isPinned =
-    canonical && pinnedEntity && pinnedEntity.canonicalId === canonical.canonicalId;
+    canonical != null && pinnedEntities.some((p) => p.canonicalId === canonical.canonicalId);
 
   const lines = linesState.status === 'ready' ? linesState.value : [];
   const selectedRawId = route?.rawId ?? null;
@@ -42,7 +43,14 @@ export default function StopCard() {
         <button
           type="button"
           className="inspector-card-close"
-          onClick={() => setInspectorStop(null)}
+          onClick={() => {
+            if (isPinned && canonical) {
+              removePinnedEntity(canonical.canonicalId);
+              if (useAppStore.getState().registryFocus?.canonicalId === canonical.canonicalId)
+                setRegistryFocus(null);
+            }
+            setInspectorStop(null);
+          }}
           title="Clear stop selection"
           aria-label="Clear stop selection"
         >
@@ -52,6 +60,7 @@ export default function StopCard() {
 
       <div className="inspector-card-title">{stop.stopName || '(unnamed stop)'}</div>
       <div className="muted inspector-card-sub">
+        <span className="inspector-id-label">ID</span>
         <span style={{ fontFamily: 'ui-monospace, monospace' }}>{stop.rawId || '—'}</span>
       </div>
 
@@ -67,13 +76,23 @@ export default function StopCard() {
             <button
               type="button"
               onClick={() => {
-                if (isPinned) setPinnedEntity(null);
-                else
-                  setPinnedEntity({
+                if (isPinned) {
+                  removePinnedEntity(canonical.canonicalId);
+                  if (useAppStore.getState().registryFocus?.canonicalId === canonical.canonicalId)
+                    setRegistryFocus(null);
+                } else {
+                  addPinnedEntity({
                     kind: 'stop',
                     canonicalId: canonical.canonicalId,
                     label: canonical.name,
                   });
+                  setRegistryFocus({
+                    kind: 'stop',
+                    canonicalId: canonical.canonicalId,
+                    lat: canonical.lat,
+                    lon: canonical.lon,
+                  });
+                }
               }}
               title="Pin this entity so the timeline slider drives its history"
             >

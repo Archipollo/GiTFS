@@ -1,9 +1,11 @@
 import type { MouseEvent as ReactMouseEvent } from 'react';
+import { useEffect } from 'react';
 import { useAppStore } from '../state/app-store';
 import PinnedEntityView from '../timeline/PinnedEntityView';
 import DiffInspector from '../diff/DiffInspector';
 import StopCard from '../inspector/StopCard';
 import RouteCard from '../inspector/RouteCard';
+import { SegmentCard } from '../inspector/SegmentCard';
 import { formatGtfsDate, stripYearSuffix, yearOfFeed } from '../timeline/math';
 
 interface RightPanelProps {
@@ -18,7 +20,12 @@ export default function RightPanel({ visible, onToggle, onResizeStart }: RightPa
   const feed = useAppStore((s) => (activeFeedId ? s.feeds[activeFeedId] : null));
   const stop = useAppStore((s) => s.inspectorStop);
   const route = useAppStore((s) => s.inspectorRoute);
-  const pinnedEntity = useAppStore((s) => s.pinnedEntity);
+  const segment = useAppStore((s) => s.inspectorSegment);
+  const hasPinned = useAppStore((s) => s.pinnedEntities.length > 0);
+
+  useEffect(() => {
+    if (!visible && (stop || route || segment)) onToggle();
+  }, [stop, route, segment]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <aside className={`panel right right-panel${visible ? '' : ' right-panel--collapsed'}`}>
@@ -40,11 +47,12 @@ export default function RightPanel({ visible, onToggle, onResizeStart }: RightPa
           ) : (
             <>
               <h3>Inspector</h3>
-              {pinnedEntity && <PinnedEntityView />}
+              {hasPinned && <PinnedEntityView />}
               {stop && <StopCard />}
+              {segment && <SegmentCard />}
               {route && <RouteCard />}
-              {!stop && !route && !pinnedEntity && feed && <FeedSummary />}
-              {!feed && !pinnedEntity && <p className="muted">No feed selected.</p>}
+              {!stop && !segment && !route && !hasPinned && feed && <FeedSummary />}
+              {!feed && !hasPinned && <p className="muted">No feed selected.</p>}
             </>
           )}
         </div>
