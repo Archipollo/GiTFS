@@ -532,21 +532,24 @@ export async function fetchRouteMetas(
     const shortExpr = hasShort ? 'r.route_short_name' : 'NULL';
     const longExpr = hasLong ? 'r.route_long_name' : 'NULL';
 
-    const tripCountExpr = hasTrips
-      ? `(SELECT COUNT(*)::INTEGER FROM ${qualifiedTable(feedId, 'trips.txt')} t WHERE t.route_id = r.route_id)`
-      : '0';
+    const tripJoin = hasTrips
+      ? `LEFT JOIN ${qualifiedTable(feedId, 'trips.txt')} t ON t.route_id = r.route_id`
+      : '';
+    const tripCountExpr = hasTrips ? `COUNT(t.trip_id)::INTEGER` : '0';
 
     const inList = routeIds.map((id) => sqlStr(id)).join(', ');
     const sql = `
       SELECT r.route_id AS route_id,
-             ${shortExpr} AS route_short_name,
-             ${longExpr}  AS route_long_name,
-             ${agencyExpr} AS agency_name,
-             TRY_CAST(r.route_type AS INTEGER) AS route_type,
+             ANY_VALUE(${shortExpr}) AS route_short_name,
+             ANY_VALUE(${longExpr})  AS route_long_name,
+             ANY_VALUE(${agencyExpr}) AS agency_name,
+             ANY_VALUE(TRY_CAST(r.route_type AS INTEGER)) AS route_type,
              ${tripCountExpr} AS trip_count
       FROM ${rt} r
       ${agencyJoin}
+      ${tripJoin}
       WHERE r.route_id IN (${inList})
+      GROUP BY r.route_id
     `;
     const res = await conn.query(sql);
     const rows: LineForStop[] = res.toArray().map((row) => {

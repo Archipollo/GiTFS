@@ -20,7 +20,7 @@ export function SegmentCard() {
       .then((rows) => { if (!cancelled) { setLines(rows); setLoading(false); } })
       .catch(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [segment?.feedId, segment?.routeIds]);
+  }, [segment]);
 
   if (!segment) return null;
 

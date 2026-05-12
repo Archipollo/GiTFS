@@ -25,7 +25,7 @@ export default function RightPanel({ visible, onToggle, onResizeStart }: RightPa
 
   useEffect(() => {
     if (!visible && (stop || route || segment)) onToggle();
-  }, [stop, route, segment]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [visible, stop, route, segment, onToggle]);
 
   return (
     <aside className={`panel right right-panel${visible ? '' : ' right-panel--collapsed'}`}>

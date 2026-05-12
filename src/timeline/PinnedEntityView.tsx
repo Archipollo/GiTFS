@@ -19,7 +19,6 @@ export default function PinnedEntityView() {
 
 function PinnedEntityCard({ pin }: { pin: PinnedEntity }) {
   const removePinnedEntity = useAppStore((s) => s.removePinnedEntity);
-  const registryFocus = useAppStore((s) => s.registryFocus);
   const setFocus = useAppStore((s) => s.setRegistryFocus);
   const feeds = useAppStore((s) => s.feeds);
   const feedOrder = useAppStore((s) => s.feedOrder);
@@ -59,7 +58,7 @@ function PinnedEntityCard({ pin }: { pin: PinnedEntity }) {
         <button
           onClick={() => {
             removePinnedEntity(pin.canonicalId);
-            if (registryFocus?.canonicalId === pin.canonicalId) setFocus(null);
+            if (useAppStore.getState().registryFocus?.canonicalId === pin.canonicalId) setFocus(null);
           }}
           style={{ padding: '2px 8px', fontSize: 11 }}
           title="Unpin"
