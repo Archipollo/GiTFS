@@ -7,6 +7,7 @@ import maplibregl, {
 } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { useAppStore } from '../state/app-store';
+import { yearOfFeed } from '../timeline/math';
 import {
   fetchStops,
   fetchShapes,
@@ -73,6 +74,51 @@ const CARTO_TILES = (style: string) => [
   `https://d.basemaps.cartocdn.com/rastertiles/${style}/{z}/{x}/{y}.png`,
 ];
 
+// --- Esri World Imagery Wayback (historical satellite basemap) --------------
+// ItemIds derived from the public WMTS capabilities XML; one mid-year snapshot
+// per calendar year. The tile service itself has no CORS restriction.
+
+const WAYBACK_BY_YEAR: Record<number, number> = {
+  2014: 3026,
+  2015: 24007,
+  2016: 13240,
+  2017: 3319,
+  2018: 14829,
+  2019: 16681,
+  2020: 18289,
+  2021: 8432,
+  2022: 13851,
+  2023: 47963,
+  2024: 39767,
+  2025: 49999,
+  2026: 49059,
+};
+
+function waybackItemIdForYear(year: number): number {
+  if (year in WAYBACK_BY_YEAR) return WAYBACK_BY_YEAR[year];
+  // Clamp to the nearest known year
+  const years = Object.keys(WAYBACK_BY_YEAR).map(Number).sort((a, b) => a - b);
+  if (year <= years[0]) return WAYBACK_BY_YEAR[years[0]];
+  if (year >= years[years.length - 1]) return WAYBACK_BY_YEAR[years[years.length - 1]];
+  // Linear interpolation — pick the closest
+  let closest = years[0];
+  for (const y of years) {
+    if (Math.abs(y - year) < Math.abs(closest - year)) closest = y;
+  }
+  return WAYBACK_BY_YEAR[closest];
+}
+
+const WAYBACK_TILES = (itemId: number) => [
+  `https://wayback.maptiles.arcgis.com/arcgis/rest/services/World_Imagery/WMTS/1.0.0/default028mm/MapServer/tile/${itemId}/{z}/{y}/{x}`,
+];
+// Inverted lookup: itemId → year, so the attribution reflects the actual
+// snapshot year loaded rather than the feed's nominal year.
+const YEAR_BY_WAYBACK_ITEM: Record<number, number> = Object.fromEntries(
+  Object.entries(WAYBACK_BY_YEAR).map(([yr, id]) => [id, Number(yr)]),
+);
+const waybackAttr = (itemId: number) =>
+  `©${YEAR_BY_WAYBACK_ITEM[itemId] ?? '?'} Esri, Maxar, Earthstar Geographics, USGS`;
+ 
 const STYLE: maplibregl.StyleSpecification = {
   version: 8,
   sources: {
@@ -139,6 +185,8 @@ export default function MapView() {
 
   // Diff mode plumbing -----------------------------------------------------
   const mapStyle = useAppStore((s) => s.mapStyle);
+  const historicalBasemap = useAppStore((s) => s.historicalBasemap);
+  const setHistoricalBasemap = useAppStore((s) => s.setHistoricalBasemap);
   const appMode = useAppStore((s) => s.mode);
   const compareFeedId = useAppStore((s) => s.compareFeedId);
   const diffStopVisibility = useAppStore((s) => s.diffStopVisibility);
@@ -146,6 +194,7 @@ export default function MapView() {
   const setDiffSegmentSummary = useAppStore((s) => s.setDiffSegmentSummary);
   const diffStopFocus = useAppStore((s) => s.diffStopFocus);
   const diffRouteFocus = useAppStore((s) => s.diffRouteFocus);
+  const diffBasemapYear = useAppStore((s) => s.diffBasemapYear);
   const diffStatus = useDiff(
     appMode === 'diff' ? activeFeedId : null,
     appMode === 'diff' ? compareFeedId : null,
@@ -165,6 +214,8 @@ export default function MapView() {
   // Auto-fit the map once; subsequent feed switches must not jump the camera
   // (scrubbing relies on a stable viewport to show differences).
   const fittedRef = useRef(false);
+  // Tracks which Wayback itemId is currently loaded as the historical basemap.
+  const waybackItemIdRef = useRef<number | null>(null);
 
   const ensureFeedRender = useCallback(async (feedId: string): Promise<FeedRender> => {
     const cached = cacheRef.current.get(feedId);
@@ -688,10 +739,61 @@ export default function MapView() {
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready) return;
-    map.setLayoutProperty('basemap_standard', 'visibility', mapStyle === 'standard' ? 'visible' : 'none');
-    map.setLayoutProperty('basemap_voyager', 'visibility', mapStyle === 'voyager' ? 'visible' : 'none');
-    map.setLayoutProperty('basemap_dark', 'visibility', mapStyle === 'dark' ? 'visible' : 'none');
-  }, [mapStyle, ready]);
+    // Hide OSM/CARTO layers only when a Wayback satellite layer will actually
+    // be shown (i.e. historical mode is on AND a feed is active). If historical
+    // is enabled but no feed is loaded the Wayback effect exits early without
+    // adding a replacement layer, so we must keep the regular basemap visible.
+    const showingWayback = historicalBasemap && !!activeFeedId;
+    map.setLayoutProperty('basemap_standard', 'visibility', !showingWayback && mapStyle === 'standard' ? 'visible' : 'none');
+    map.setLayoutProperty('basemap_voyager', 'visibility', !showingWayback && mapStyle === 'voyager' ? 'visible' : 'none');
+    map.setLayoutProperty('basemap_dark', 'visibility', !showingWayback && mapStyle === 'dark' ? 'visible' : 'none');
+  }, [mapStyle, historicalBasemap, activeFeedId, ready]);
+
+  // In standard mode: swap in era-appropriate Wayback satellite tiles when a feed
+  // is active (hiding OSM), and fall back to OSM when no feed is loaded.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+
+    const removeWayback = () => {
+      if (waybackItemIdRef.current === null) return;
+      if (map.getLayer('basemap_historical')) map.removeLayer('basemap_historical');
+      if (map.getSource('basemap_historical')) map.removeSource('basemap_historical');
+      waybackItemIdRef.current = null;
+    };
+
+    if (!historicalBasemap || !activeFeedId) {
+      removeWayback();
+      return;
+    }
+
+    const feedMeta = useAppStore.getState().feeds[activeFeedId];
+    if (!feedMeta) return;
+    // In diff mode use the explicit basemap-year override when set; otherwise
+    // fall back to feed A's year (same behaviour as timeline mode).
+    const baseFeedYear = yearOfFeed(feedMeta);
+    const year = (appMode === 'diff' && diffBasemapYear != null)
+      ? diffBasemapYear
+      : baseFeedYear.year;
+    const itemId = waybackItemIdForYear(year);
+
+    if (waybackItemIdRef.current !== itemId) {
+      if (map.getLayer('basemap_historical')) map.removeLayer('basemap_historical');
+      if (map.getSource('basemap_historical')) map.removeSource('basemap_historical');
+      map.addSource('basemap_historical', {
+        type: 'raster',
+        tiles: WAYBACK_TILES(itemId),
+        tileSize: 256,
+        attribution: waybackAttr(itemId),
+        maxzoom: 17,
+      });
+      map.addLayer(
+        { id: 'basemap_historical', type: 'raster', source: 'basemap_historical' },
+        'shapes-line-casing',
+      );
+      waybackItemIdRef.current = itemId;
+    }
+  }, [historicalBasemap, activeFeedId, appMode, diffBasemapYear, ready]);
 
   // Drive the canonical-entity focus halo.
   useEffect(() => {
@@ -1094,7 +1196,7 @@ export default function MapView() {
         title={
           mapStyle === 'standard' ? 'Switch to light map (Voyager)' :
           mapStyle === 'voyager' ? 'Switch to dark map' :
-          'Switch to standard map'
+          'Switch to standard map (OSM)'
         }
         onClick={() =>
           setMapStyle(
@@ -1105,6 +1207,13 @@ export default function MapView() {
         }
       >
         {mapStyle === 'standard' ? '◑' : mapStyle === 'voyager' ? '○' : '●'}
+      </button>
+      <button
+        className={`map-basemap-toggle map-historical-toggle${historicalBasemap ? ' active' : ''}`}
+        title={historicalBasemap ? 'Disable historical satellite basemap' : 'Enable historical satellite basemap'}
+        onClick={() => setHistoricalBasemap(!historicalBasemap)}
+      >
+        <i className="fa-solid fa-satellite" />
       </button>
     </>
   );

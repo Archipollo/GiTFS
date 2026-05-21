@@ -78,6 +78,10 @@ export interface AppState {
   mapStyle: MapStyle;
   setMapStyle: (s: MapStyle) => void;
 
+  /** Whether the era-matched Wayback satellite basemap is active. Overrides `mapStyle`. */
+  historicalBasemap: boolean;
+  setHistoricalBasemap: (v: boolean) => void;
+
   feeds: Record<string, FeedMeta>;
   feedOrder: string[];
   activeFeedId: string | null;
@@ -180,6 +184,14 @@ export interface AppState {
   setDiffStopFocus: (canonicalId: string | null) => void;
   setDiffRouteFocus: (canonicalId: string | null) => void;
   clearDiffFocus: () => void;
+
+  /**
+   * Year to use for the Wayback satellite basemap in diff mode.
+   * Null = follow feed A's year (default). Setting this never affects
+   * the A/B feed pair — only the background imagery changes.
+   */
+  diffBasemapYear: number | null;
+  setDiffBasemapYear: (year: number | null) => void;
 }
 
 export function selectMapBusy(s: AppState): boolean {
@@ -203,6 +215,9 @@ export function selectMapBusyLabel(s: AppState): string {
 export const useAppStore = create<AppState>((set) => ({
   mapStyle: 'standard',
   setMapStyle: (mapStyle) => set({ mapStyle }),
+
+  historicalBasemap: false,
+  setHistoricalBasemap: (historicalBasemap) => set({ historicalBasemap }),
 
   mode: 'timeline',
   setMode: (mode) =>
@@ -365,4 +380,7 @@ export const useAppStore = create<AppState>((set) => ({
   setDiffStopFocus: (diffStopFocus) => set({ diffStopFocus }),
   setDiffRouteFocus: (diffRouteFocus) => set({ diffRouteFocus }),
   clearDiffFocus: () => set({ diffStopFocus: null, diffRouteFocus: null }),
+
+  diffBasemapYear: null,
+  setDiffBasemapYear: (diffBasemapYear) => set({ diffBasemapYear }),
 }));

@@ -4,6 +4,7 @@ import LeftPanel from './app-shell/LeftPanel';
 import RightPanel from './app-shell/RightPanel';
 import MapView from './map/MapView';
 import TimelineStrip from './timeline/TimelineStrip';
+import { DiffTimelineStrip } from './timeline/DiffTimelineStrip';
 import { rehydrateOnBoot } from './gtfs/feed-loader';
 import { rehydrateRegistryOnBoot } from './registry/registry';
 import './app-shell/layout.css';
@@ -51,6 +52,7 @@ export default function App() {
         <main className="app-map">
           <MapView />
           <TimelineStrip />
+          <DiffTimelineStrip />
         </main>
         <RightPanel
           visible={rightVisible}
