@@ -739,12 +739,15 @@ export default function MapView() {
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready) return;
-    // When historical basemap is active all base tile layers are hidden in
-    // favour of the Wayback satellite layer (managed by the effect below).
-    map.setLayoutProperty('basemap_standard', 'visibility', !historicalBasemap && mapStyle === 'standard' ? 'visible' : 'none');
-    map.setLayoutProperty('basemap_voyager', 'visibility', !historicalBasemap && mapStyle === 'voyager' ? 'visible' : 'none');
-    map.setLayoutProperty('basemap_dark', 'visibility', !historicalBasemap && mapStyle === 'dark' ? 'visible' : 'none');
-  }, [mapStyle, historicalBasemap, ready]);
+    // Hide OSM/CARTO layers only when a Wayback satellite layer will actually
+    // be shown (i.e. historical mode is on AND a feed is active). If historical
+    // is enabled but no feed is loaded the Wayback effect exits early without
+    // adding a replacement layer, so we must keep the regular basemap visible.
+    const showingWayback = historicalBasemap && !!activeFeedId;
+    map.setLayoutProperty('basemap_standard', 'visibility', !showingWayback && mapStyle === 'standard' ? 'visible' : 'none');
+    map.setLayoutProperty('basemap_voyager', 'visibility', !showingWayback && mapStyle === 'voyager' ? 'visible' : 'none');
+    map.setLayoutProperty('basemap_dark', 'visibility', !showingWayback && mapStyle === 'dark' ? 'visible' : 'none');
+  }, [mapStyle, historicalBasemap, activeFeedId, ready]);
 
   // In standard mode: swap in era-appropriate Wayback satellite tiles when a feed
   // is active (hiding OSM), and fall back to OSM when no feed is loaded.

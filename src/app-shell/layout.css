@@ -145,7 +145,7 @@
 }
 .map-historical-toggle.active {
   background: #fbbf24;
-  color: #fff;
+  color: #1a1a1a;
 }
 .map-historical-toggle.active:hover {
   background: #f59e0b;

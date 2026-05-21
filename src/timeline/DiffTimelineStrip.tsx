@@ -1,6 +1,6 @@
 import { useMemo } from 'react';
 import { useAppStore } from '../state/app-store';
-import { yearOfFeed, type FeedYear } from './math';
+import { yearOfFeed, pickFeedForYear, type FeedYear } from './math';
 
 /**
  * Basemap year slider for diff mode.
@@ -13,6 +13,7 @@ export function DiffTimelineStrip() {
   const mode = useAppStore((s) => s.mode);
   const feedOrder = useAppStore((s) => s.feedOrder);
   const feeds = useAppStore((s) => s.feeds);
+  const activeFeedId = useAppStore((s) => s.activeFeedId);
   const diffBasemapYear = useAppStore((s) => s.diffBasemapYear);
   const setDiffBasemapYear = useAppStore((s) => s.setDiffBasemapYear);
   const historicalBasemap = useAppStore((s) => s.historicalBasemap);
@@ -37,15 +38,16 @@ export function DiffTimelineStrip() {
   if (!historicalBasemap) return null;
   if (feedYears.length < 2) return null;
 
-  // Default to the most-recent available year when no override is set.
-  const activeYear = diffBasemapYear ?? feedYears[feedYears.length - 1].year;
-  const index = Math.max(
-    0,
-    feedYears.findIndex((y) => y.year === activeYear),
-  );
-  // findIndex returns -1 when activeYear is between feed years (e.g. 2025 with
-  // feeds only for 2024 and 2026). Clamp to the nearest available year.
-  const clampedIndex = index >= 0 ? index : feedYears.length - 1;
+  // null = follow feed A's year, matching MapView's behavior.
+  const feedAMeta = activeFeedId ? feeds[activeFeedId] : null;
+  const feedAYear = feedAMeta ? yearOfFeed(feedAMeta).year : null;
+  const activeYear = diffBasemapYear ?? feedAYear ?? feedYears[feedYears.length - 1].year;
+  // Use pickFeedForYear to resolve exact-year matches and clamp to the nearest
+  // available year when activeYear falls between feed years.
+  const picked = pickFeedForYear(feedYears, activeYear, feeds);
+  const clampedIndex = picked
+    ? feedYears.findIndex((y) => y.feedId === picked.feedId)
+    : feedYears.length - 1;
   const firstYear = feedYears[0].year;
   const lastYear = feedYears[feedYears.length - 1].year;
 
