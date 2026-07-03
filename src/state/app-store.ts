@@ -155,6 +155,40 @@ export interface AppState {
   diffSegmentVisibility: Record<GeomStatus, boolean>;
   toggleDiffSegmentVisibility: (s: GeomStatus) => void;
   /**
+   * Which overlay the diff-mode map shows for lines: geometry changes
+   * (added/removed/unchanged track, via `diffSegmentVisibility`) or the
+   * frequency overlay (trips/week gained or lost per route). Mutually
+   * exclusive — both drawn from overlapping shape data, so showing both
+   * at once would be unreadable.
+   */
+  diffOverlay: 'geometry' | 'frequency';
+  setDiffOverlay: (o: 'geometry' | 'frequency') => void;
+  /**
+   * Frequency-overlay legend data, updated by the map after it computes the
+   * trips/week diff — mirrors `diffSegmentSummary`'s "compute once on the
+   * map, read from the sidebar" split.
+   */
+  diffFrequencySummary:
+    | {
+        feedA: string;
+        feedB: string;
+        maxAbsDelta: number;
+        scaleAbsDelta: number;
+        routeCount: number;
+      }
+    | null;
+  setDiffFrequencySummary: (
+    s:
+      | {
+          feedA: string;
+          feedB: string;
+          maxAbsDelta: number;
+          scaleAbsDelta: number;
+          routeCount: number;
+        }
+      | null,
+  ) => void;
+  /**
    * Per-status total segment length in metres, updated by the map after it
    * builds the segment diff. Lives in the store (rather than being
    * recomputed in the sidebar) to avoid running the expensive resample +
@@ -181,9 +215,25 @@ export interface AppState {
    */
   diffStopFocus: string | null;
   diffRouteFocus: string | null;
+  /**
+   * Other canonical routes found at the point that was last clicked to set
+   * `diffRouteFocus` (always includes the focused id itself). Lets the
+   * inspector offer a switcher when several lines overlap on screen —
+   * clicking a line no longer commits to just the topmost one.
+   */
+  diffRouteCandidates: string[];
   setDiffStopFocus: (canonicalId: string | null) => void;
-  setDiffRouteFocus: (canonicalId: string | null) => void;
+  /** `candidates` defaults to `[canonicalId]` when omitted or null is passed. */
+  setDiffRouteFocus: (canonicalId: string | null, candidates?: string[]) => void;
   clearDiffFocus: () => void;
+  /**
+   * Bumped to request that MapView zoom/fit the camera to the full extent of
+   * the currently focused diff route. Clicking a line only opens the
+   * inspector and highlights it in place; zooming out is an explicit,
+   * separate action (the "Show full line" button in the inspector).
+   */
+  diffRouteZoomToken: number;
+  requestDiffRouteZoom: () => void;
 
   /**
    * Year to use for the Wayback satellite basemap in diff mode.
@@ -222,7 +272,7 @@ export const useAppStore = create<AppState>((set) => ({
   mode: 'timeline',
   setMode: (mode) =>
     set((s) => {
-      const cleared = { diffStopFocus: null, diffRouteFocus: null } as const;
+      const cleared = { diffStopFocus: null, diffRouteFocus: null, diffRouteCandidates: [] as string[] };
       if (mode !== 'diff') return { mode, ...cleared };
       if (s.feedOrder.length < 2) return { mode, compareFeedId: null, ...cleared };
       // Preserve an explicit pair the user already set up via the diff
@@ -373,13 +423,24 @@ export const useAppStore = create<AppState>((set) => ({
         [s]: !st.diffSegmentVisibility[s],
       },
     })),
+  diffOverlay: 'geometry',
+  setDiffOverlay: (diffOverlay) => set({ diffOverlay }),
+  diffFrequencySummary: null,
+  setDiffFrequencySummary: (diffFrequencySummary) => set({ diffFrequencySummary }),
   diffSegmentSummary: null,
   setDiffSegmentSummary: (diffSegmentSummary) => set({ diffSegmentSummary }),
   diffStopFocus: null,
   diffRouteFocus: null,
+  diffRouteCandidates: [],
   setDiffStopFocus: (diffStopFocus) => set({ diffStopFocus }),
-  setDiffRouteFocus: (diffRouteFocus) => set({ diffRouteFocus }),
-  clearDiffFocus: () => set({ diffStopFocus: null, diffRouteFocus: null }),
+  setDiffRouteFocus: (diffRouteFocus, candidates) =>
+    set({
+      diffRouteFocus,
+      diffRouteCandidates: diffRouteFocus == null ? [] : candidates ?? [diffRouteFocus],
+    }),
+  clearDiffFocus: () => set({ diffStopFocus: null, diffRouteFocus: null, diffRouteCandidates: [] }),
+  diffRouteZoomToken: 0,
+  requestDiffRouteZoom: () => set((s) => ({ diffRouteZoomToken: s.diffRouteZoomToken + 1 })),
 
   diffBasemapYear: null,
   setDiffBasemapYear: (diffBasemapYear) => set({ diffBasemapYear }),

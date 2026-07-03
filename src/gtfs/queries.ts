@@ -577,3 +577,114 @@ export async function fetchRouteMetas(
     await conn.close();
   }
 }
+
+/**
+ * Estimated scheduled trips per week, per route_id — used by the diff-mode
+ * frequency overlay. When `calendar.txt` is present, each trip is weighted
+ * by how many of the 7 weekdays its `service_id` operates (a typical-week
+ * approximation; `calendar_dates.txt` exceptions are not ingested, see
+ * `ingest.ts`). Feeds without a calendar table fall back to a plain trip
+ * count so the overlay still renders, at the cost of no longer being a
+ * literal "per week" figure.
+ */
+export async function fetchRouteWeeklyTrips(
+  feedId: string,
+  routeIds: string[],
+): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  if (routeIds.length === 0) return out;
+  await ensureFeedTablesLoaded(feedId);
+  const conn = await getConnection();
+  try {
+    if (!(await tableExists(conn, feedId, 'trips'))) return out;
+    const trips = qualifiedTable(feedId, 'trips.txt');
+    const inList = routeIds.map((id) => sqlStr(id)).join(', ');
+    const hasCalendar = await tableExists(conn, feedId, 'calendar');
+
+    const sql = hasCalendar
+      ? `
+        SELECT t.route_id AS route_id, SUM(c.wk)::DOUBLE AS n
+        FROM ${trips} t
+        JOIN (
+          SELECT service_id,
+                 (CAST(monday AS INTEGER) + CAST(tuesday AS INTEGER) + CAST(wednesday AS INTEGER)
+                  + CAST(thursday AS INTEGER) + CAST(friday AS INTEGER) + CAST(saturday AS INTEGER)
+                  + CAST(sunday AS INTEGER)) AS wk
+          FROM ${qualifiedTable(feedId, 'calendar.txt')}
+        ) c ON c.service_id = t.service_id
+        WHERE t.route_id IN (${inList})
+        GROUP BY t.route_id
+      `
+      : `
+        SELECT route_id AS route_id, COUNT(*)::DOUBLE AS n
+        FROM ${trips}
+        WHERE route_id IN (${inList})
+        GROUP BY route_id
+      `;
+    const res = await conn.query(sql);
+    for (const row of res.toArray()) {
+      out.set(String(row.route_id), Number(row.n ?? 0));
+    }
+    return out;
+  } finally {
+    await conn.close();
+  }
+}
+
+/**
+ * The most-common shape's coordinates for each route_id — a single
+ * representative polyline per route, used to draw the diff-mode frequency
+ * overlay (one line per route rather than one per shape variant).
+ */
+export async function fetchRouteRepresentativeShapes(
+  feedId: string,
+  routeIds: string[],
+): Promise<Map<string, [number, number][]>> {
+  const out = new Map<string, [number, number][]>();
+  if (routeIds.length === 0) return out;
+  await ensureFeedTablesLoaded(feedId);
+  const conn = await getConnection();
+  try {
+    if (!(await tableExists(conn, feedId, 'trips'))) return out;
+    if (!(await tableExists(conn, feedId, 'shapes'))) return out;
+    const hasShapeCol = await columnExists(conn, feedId, 'trips', 'shape_id');
+    if (!hasShapeCol) return out;
+    const trips = qualifiedTable(feedId, 'trips.txt');
+    const shapes = qualifiedTable(feedId, 'shapes.txt');
+    const inList = routeIds.map((id) => sqlStr(id)).join(', ');
+
+    const res = await conn.query(`
+      WITH counts AS (
+        SELECT route_id, shape_id, COUNT(*) AS n
+        FROM ${trips}
+        WHERE route_id IN (${inList}) AND shape_id IS NOT NULL
+        GROUP BY route_id, shape_id
+      ),
+      best AS (
+        SELECT route_id, shape_id FROM (
+          SELECT route_id, shape_id,
+                 ROW_NUMBER() OVER (PARTITION BY route_id ORDER BY n DESC) AS rn
+          FROM counts
+        ) ranked
+        WHERE rn = 1
+      )
+      SELECT best.route_id AS route_id,
+             TRY_CAST(s.shape_pt_lon AS DOUBLE) AS lon,
+             TRY_CAST(s.shape_pt_lat AS DOUBLE) AS lat,
+             TRY_CAST(s.shape_pt_sequence AS INTEGER) AS seq
+      FROM best
+      JOIN ${shapes} s ON s.shape_id = best.shape_id
+      WHERE TRY_CAST(s.shape_pt_lon AS DOUBLE) IS NOT NULL
+      ORDER BY best.route_id, seq
+    `);
+    for (const row of res.toArray()) {
+      const routeId = String(row.route_id);
+      let arr = out.get(routeId);
+      if (!arr) { arr = []; out.set(routeId, arr); }
+      arr.push([row.lon as number, row.lat as number]);
+    }
+    return out;
+  } finally {
+    await conn.close();
+  }
+}

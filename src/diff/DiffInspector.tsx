@@ -320,6 +320,13 @@ function DiffRouteCard({
   const setDiffRouteFocus = useAppStore((s) => s.setDiffRouteFocus);
   const setDiffStopFocus = useAppStore((s) => s.setDiffStopFocus);
   const diffStopFocus = useAppStore((s) => s.diffStopFocus);
+  const diffRouteCandidates = useAppStore((s) => s.diffRouteCandidates);
+  const requestDiffRouteZoom = useAppStore((s) => s.requestDiffRouteZoom);
+
+  const otherCandidates = diffRouteCandidates
+    .filter((cid) => cid !== entry.canonicalId)
+    .map((cid) => result.routes.find((r) => r.canonicalId === cid))
+    .filter((r): r is RouteDiffEntry => !!r);
 
   const stopsState = useDiffStopsForRoute(entry.canonicalId, feedA, feedB, result);
   const directions = stopsState.status === 'ready' ? stopsState.directions : [];
@@ -346,15 +353,25 @@ function DiffRouteCard({
       <div className="inspector-card-head">
         <div className="inspector-card-kind">Line</div>
         <StatusBadge status={entry.status} />
-        <button
-          type="button"
-          className="inspector-card-close"
-          onClick={() => setDiffRouteFocus(null)}
-          title="Clear line focus"
-          aria-label="Clear line focus"
-        >
-          ×
-        </button>
+        <div className="inspector-card-head-actions">
+          <button
+            type="button"
+            className="inspector-card-zoom"
+            onClick={() => requestDiffRouteZoom()}
+            title="Zoom the map to this line's full extent"
+          >
+            Show full line
+          </button>
+          <button
+            type="button"
+            className="inspector-card-close"
+            onClick={() => setDiffRouteFocus(null)}
+            title="Clear line focus"
+            aria-label="Clear line focus"
+          >
+            ×
+          </button>
+        </div>
       </div>
       <div className="inspector-card-title">
         {entry.canonical.shortName || entry.canonical.longName || '(unnamed route)'}
@@ -372,20 +389,45 @@ function DiffRouteCard({
         </div>
       )}
 
-      <div className="diff-ab">
-        <div className="diff-ab-col">
-          <div className="diff-ab-head diff-ab-head--a">A · {aLabel ?? '—'}</div>
-          {a ? <RouteSideTable side={a} highlight={highlight} /> : <div className="diff-ab-absent">not present</div>}
+      {otherCandidates.length > 0 && (
+        <InspectorSection title="Other lines on this segment" count={otherCandidates.length}>
+          <div className="line-pill-list">
+            {otherCandidates.map((r) => (
+              <LinePill
+                key={r.canonicalId}
+                line={{
+                  route_short_name: r.canonical.shortName,
+                  route_long_name: r.canonical.longName,
+                  agency_name: (r.a ?? r.b)?.agencyName ?? '',
+                  mode: r.canonical.mode,
+                  trip_count: 0,
+                }}
+                status={r.status}
+                selected={false}
+                onClick={() => setDiffRouteFocus(r.canonicalId, diffRouteCandidates)}
+              />
+            ))}
+          </div>
+        </InspectorSection>
+      )}
+
+      <InspectorSection title="Details" defaultCollapsed>
+        <div className="diff-ab">
+          <div className="diff-ab-col">
+            <div className="diff-ab-head diff-ab-head--a">A · {aLabel ?? '—'}</div>
+            {a ? <RouteSideTable side={a} highlight={highlight} /> : <div className="diff-ab-absent">not present</div>}
+          </div>
+          <div className="diff-ab-col">
+            <div className="diff-ab-head diff-ab-head--b">B · {bLabel ?? '—'}</div>
+            {b ? <RouteSideTable side={b} highlight={highlight} /> : <div className="diff-ab-absent">not present</div>}
+          </div>
         </div>
-        <div className="diff-ab-col">
-          <div className="diff-ab-head diff-ab-head--b">B · {bLabel ?? '—'}</div>
-          {b ? <RouteSideTable side={b} highlight={highlight} /> : <div className="diff-ab-absent">not present</div>}
-        </div>
-      </div>
+      </InspectorSection>
 
       <InspectorSection
         title="Stops"
         count={stopsSectionCount(stopsState.status, course)}
+        defaultCollapsed
       >
         {stopsState.status === 'loading' && (
           <div className="muted inspector-placeholder">Loading stops…</div>

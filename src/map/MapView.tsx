@@ -37,6 +37,16 @@ import {
   type DiffedRun,
   type DiffedShapes,
 } from '../gtfs/segment-graph';
+import {
+  FREQUENCY_GAIN_COLOR,
+  FREQUENCY_LOSS_COLOR,
+  FREQUENCY_MAX_WIDTH,
+  FREQUENCY_MIN_WIDTH,
+  FREQUENCY_NEUTRAL_COLOR,
+  frequencyDiffToGeoJSON,
+  getOrComputeFrequencyDiff,
+  type FrequencyDiffResult,
+} from '../diff/frequency';
 import { getRoutesForShape, getRouteDirections } from '../inspector/data';
 
 const INITIAL_CENTER: [number, number] = [14.55, 47.6];
@@ -65,6 +75,32 @@ const DIFF_COLOR_EXPR: ExpressionSpecification = [
 
 // Segment-level line diff uses one layer per geom_status (each with its
 // own static line-color), so no match-expression is needed here.
+const DIFF_SEGMENT_LINE_LAYERS = [
+  'diff-segments-added-line',
+  'diff-segments-removed-line',
+  'diff-segments-unchanged-line',
+];
+
+// Frequency overlay: `delta_norm` is the trips/week delta scaled to [-1, 1]
+// by the diff's robust p95 cap (see `frequencyDiffToGeoJSON`), so a fixed
+// domain here works across any feed pair. Diverging amber (loss) → grey (no
+// change) → blue (gain); width tracks |delta_norm| the same way so a big
+// change reads as both bolder in colour and thicker.
+const FREQUENCY_COLOR_EXPR: ExpressionSpecification = [
+  'interpolate',
+  ['linear'],
+  ['get', 'delta_norm'],
+  -1, FREQUENCY_LOSS_COLOR,
+  0, FREQUENCY_NEUTRAL_COLOR,
+  1, FREQUENCY_GAIN_COLOR,
+];
+const FREQUENCY_WIDTH_EXPR: ExpressionSpecification = [
+  'interpolate',
+  ['linear'],
+  ['abs', ['get', 'delta_norm']],
+  0, FREQUENCY_MIN_WIDTH,
+  1, FREQUENCY_MAX_WIDTH,
+];
 
 const CARTO_ATTR = '© OpenStreetMap contributors, © CARTO';
 const CARTO_TILES = (style: string) => [
@@ -192,8 +228,11 @@ export default function MapView() {
   const diffStopVisibility = useAppStore((s) => s.diffStopVisibility);
   const diffSegmentVisibility = useAppStore((s) => s.diffSegmentVisibility);
   const setDiffSegmentSummary = useAppStore((s) => s.setDiffSegmentSummary);
+  const diffOverlay = useAppStore((s) => s.diffOverlay);
+  const setDiffFrequencySummary = useAppStore((s) => s.setDiffFrequencySummary);
   const diffStopFocus = useAppStore((s) => s.diffStopFocus);
   const diffRouteFocus = useAppStore((s) => s.diffRouteFocus);
+  const diffRouteZoomToken = useAppStore((s) => s.diffRouteZoomToken);
   const diffBasemapYear = useAppStore((s) => s.diffBasemapYear);
   const diffStatus = useDiff(
     appMode === 'diff' ? activeFeedId : null,
@@ -216,6 +255,10 @@ export default function MapView() {
   const fittedRef = useRef(false);
   // Tracks which Wayback itemId is currently loaded as the historical basemap.
   const waybackItemIdRef = useRef<number | null>(null);
+  // Bounds of the currently-focused diff route's shapes (both feeds), kept
+  // for the "Show full line" button — clicking a line highlights it in
+  // place without moving the camera; only this explicit action zooms.
+  const diffRouteBoundsRef = useRef<maplibregl.LngLatBoundsLike | null>(null);
 
   const ensureFeedRender = useCallback(async (feedId: string): Promise<FeedRender> => {
     const cached = cacheRef.current.get(feedId);
@@ -261,6 +304,7 @@ export default function MapView() {
       map.addSource('inspector-stop', { type: 'geojson', data: emptyFC() });
       map.addSource('inspector-shape', { type: 'geojson', data: emptyFC() });
       map.addSource('diff-segments', { type: 'geojson', data: emptyFC() });
+      map.addSource('diff-frequency', { type: 'geojson', data: emptyFC() });
       map.addSource('diff-stops', { type: 'geojson', data: emptyFC() });
       map.addSource('diff-ghost', { type: 'geojson', data: emptyFC() });
       map.addSource('diff-arrow', { type: 'geojson', data: emptyFC() });
@@ -360,6 +404,31 @@ export default function MapView() {
         paint: {
           'line-color': SEGMENT_COLOR.added,
           'line-width': ['interpolate', ['linear'], ['zoom'], 8, 1.8, 14, 4.0],
+          'line-opacity': 0.95,
+        },
+      });
+      // Frequency overlay: one line per matched route, colour+width driven
+      // by `delta_norm` (see FREQUENCY_COLOR_EXPR / FREQUENCY_WIDTH_EXPR).
+      // Hidden unless diffOverlay === 'frequency' (visibility effect below).
+      map.addLayer({
+        id: 'diff-frequency-casing',
+        type: 'line',
+        source: 'diff-frequency',
+        layout: { 'line-cap': 'round', 'line-join': 'round' },
+        paint: {
+          'line-color': '#ffffff',
+          'line-width': ['+', FREQUENCY_WIDTH_EXPR, 2],
+          'line-opacity': 0.55,
+        },
+      });
+      map.addLayer({
+        id: 'diff-frequency-line',
+        type: 'line',
+        source: 'diff-frequency',
+        layout: { 'line-cap': 'round', 'line-join': 'round' },
+        paint: {
+          'line-color': FREQUENCY_COLOR_EXPR,
+          'line-width': FREQUENCY_WIDTH_EXPR,
           'line-opacity': 0.95,
         },
       });
@@ -511,12 +580,11 @@ export default function MapView() {
       // Diff segment → route focus. Each run feature carries its
       // originating feed ('a' | 'b') and its shape_id verbatim, so we
       // resolve shape → route → canonical route directly without any
-      // ambiguity about which feed's registry to look in.
-      for (const layerId of [
-        'diff-segments-added-line',
-        'diff-segments-removed-line',
-        'diff-segments-unchanged-line',
-      ]) {
+      // ambiguity about which feed's registry to look in. A small bbox
+      // (not just the topmost feature) collects every line coincident with
+      // the click point, so overlapping routes all become switchable
+      // candidates in the inspector instead of only the topmost one.
+      for (const layerId of DIFF_SEGMENT_LINE_LAYERS) {
         map.on('mouseenter', layerId, () => {
           map.getCanvas().style.cursor = 'pointer';
         });
@@ -524,23 +592,72 @@ export default function MapView() {
           map.getCanvas().style.cursor = '';
         });
         map.on('click', layerId, (evt) => {
-          const f = evt.features?.[0];
-          if (!f) return;
           const st = useAppStore.getState();
           const a = st.activeFeedId;
           const b = st.compareFeedId;
           if (!a || !b) return;
-          const pick = resolveClickedRun(f.properties ?? {}, a, b);
-          if (!pick) return;
-          getRoutesForShape(pick.feedId, pick.shapeId)
-            .then((routeIds) => {
-              if (routeIds.length === 0) return;
-              const canonical = lookupRoute(pick.feedId, routeIds[0])?.canonicalId ?? null;
-              if (canonical) useAppStore.getState().setDiffRouteFocus(canonical);
+          const f = evt.features?.[0];
+          if (!f) return;
+          const clickedPick = resolveClickedRun(f.properties ?? {}, a, b);
+          if (!clickedPick) return;
+
+          const bbox: [PointLike, PointLike] = [
+            [evt.point.x - 4, evt.point.y - 4],
+            [evt.point.x + 4, evt.point.y + 4],
+          ];
+          const allFeatures = map.queryRenderedFeatures(bbox, { layers: DIFF_SEGMENT_LINE_LAYERS });
+          const picks = allFeatures
+            .map((feat) => resolveClickedRun(feat.properties ?? {}, a, b))
+            .filter((p): p is { feedId: string; shapeId: string } => !!p);
+          const uniqueKeys = [...new Set(picks.map((p) => `${p.feedId}\t${p.shapeId}`))];
+
+          Promise.all(
+            uniqueKeys.map((key) => {
+              const [feedId, shapeId] = key.split('\t');
+              return getRoutesForShape(feedId, shapeId).then((routeIds) => ({ feedId, shapeId, routeIds }));
+            }),
+          )
+            .then((results) => {
+              const candidateSet = new Set<string>();
+              let clickedCanonical: string | null = null;
+              for (const { feedId, shapeId, routeIds } of results) {
+                for (const rid of routeIds) {
+                  const c = lookupRoute(feedId, rid)?.canonicalId;
+                  if (!c) continue;
+                  candidateSet.add(c);
+                  if (feedId === clickedPick.feedId && shapeId === clickedPick.shapeId && clickedCanonical == null) {
+                    clickedCanonical = c;
+                  }
+                }
+              }
+              if (!clickedCanonical) return;
+              useAppStore.getState().setDiffRouteFocus(clickedCanonical, [...candidateSet]);
             })
             .catch((err) => console.warn('segment → route resolve failed', err));
         });
       }
+
+      map.on('mouseenter', 'diff-frequency-line', () => {
+        map.getCanvas().style.cursor = 'pointer';
+      });
+      map.on('mouseleave', 'diff-frequency-line', () => {
+        map.getCanvas().style.cursor = '';
+      });
+      map.on('click', 'diff-frequency-line', (evt) => {
+        const f = evt.features?.[0];
+        if (!f) return;
+        const canonicalId = String(f.properties?.canonicalId ?? '');
+        if (!canonicalId) return;
+        const bbox: [PointLike, PointLike] = [
+          [evt.point.x - 4, evt.point.y - 4],
+          [evt.point.x + 4, evt.point.y + 4],
+        ];
+        const allFeatures = map.queryRenderedFeatures(bbox, { layers: ['diff-frequency-line'] });
+        const candidates = [...new Set(
+          allFeatures.map((feat) => String(feat.properties?.canonicalId ?? '')).filter(Boolean),
+        )];
+        useAppStore.getState().setDiffRouteFocus(canonicalId, candidates.length ? candidates : [canonicalId]);
+      });
 
       map.on('mouseenter', 'stops-circle', () => {
         map.getCanvas().style.cursor = 'pointer';
@@ -598,8 +715,17 @@ export default function MapView() {
             const appMode = useAppStore.getState().mode;
             const shapeId = shapeIds[0];
             if (appMode === 'diff') {
-              const canonical = lookupRoute(activeId, routeIds[0])?.canonicalId ?? null;
-              if (canonical) useAppStore.getState().setDiffRouteFocus(canonical);
+              const candidateSet = new Set<string>();
+              let clickedCanonical: string | null = null;
+              for (const rid of routeIds) {
+                const c = lookupRoute(activeId, rid)?.canonicalId;
+                if (!c) continue;
+                candidateSet.add(c);
+                if (rid === routeIds[0]) clickedCanonical = c;
+              }
+              if (clickedCanonical) {
+                useAppStore.getState().setDiffRouteFocus(clickedCanonical, [...candidateSet]);
+              }
             } else if (routeIds.length === 1) {
               const canonical = lookupRoute(activeId, routeIds[0])?.canonicalId ?? null;
               useAppStore.getState().setInspectorRoute({ feedId: activeId, rawId: routeIds[0], shapeId, canonicalId: canonical });
@@ -619,6 +745,7 @@ export default function MapView() {
             'diff-segments-added-line',
             'diff-segments-removed-line',
             'diff-segments-unchanged-line',
+            'diff-frequency-line',
           ],
         });
         if (hit.length === 0) {
@@ -1012,6 +1139,36 @@ export default function MapView() {
     setDiffSegmentSummary,
   ]);
 
+  // Frequency overlay: cheap aggregate SQL (no worker needed), so this just
+  // recomputes on the main thread whenever the diff result or overlay
+  // selection changes. Cached per-diff inside `frequency.ts`.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    if (diffStatus.kind !== 'ready' || diffOverlay !== 'frequency') {
+      setSource(map, 'diff-frequency', emptyFC());
+      setDiffFrequencySummary(null);
+      return;
+    }
+    let cancelled = false;
+    getOrComputeFrequencyDiff(diffStatus.result)
+      .then((result: FrequencyDiffResult) => {
+        if (cancelled) return;
+        setSource(map, 'diff-frequency', frequencyDiffToGeoJSON(result));
+        setDiffFrequencySummary({
+          feedA: result.feedA,
+          feedB: result.feedB,
+          maxAbsDelta: result.maxAbsDelta,
+          scaleAbsDelta: result.scaleAbsDelta,
+          routeCount: result.entries.length,
+        });
+      })
+      .catch((err) => console.warn('diff-frequency compute failed', err));
+    return () => {
+      cancelled = true;
+    };
+  }, [diffStatus, diffOverlay, ready, setDiffFrequencySummary]);
+
   // In diff mode: hide per-feed stops, hide base shapes entirely, and show
   // the diff polyline + dot overlays instead.
   useEffect(() => {
@@ -1039,6 +1196,26 @@ export default function MapView() {
     map.setLayoutProperty('diff-stops-circle', 'visibility', vis);
     map.setLayoutProperty('diff-ghost-circle', 'visibility', vis);
     map.setLayoutProperty('diff-arrow-line', 'visibility', vis);
+    // Stop markers use their own categorical palette (added/removed/moved/
+    // renamed) that competes with the frequency overlay's diverging
+    // gain/loss scale — and "renamed" happens to share frequency's blue. In
+    // frequency view, dim the stops to context rather than hide them, so
+    // both stories (line changes, frequency changes) stay legible without
+    // fighting for the same colour channel.
+    const freqDim = diffOverlay === 'frequency';
+    map.setPaintProperty('diff-stops-circle', 'circle-opacity', freqDim
+      ? ['case', ['==', ['get', 'status'], 'unchanged'], 0.15, 0.30]
+      : ['case', ['==', ['get', 'status'], 'unchanged'], 0.55, 0.95]);
+    map.setPaintProperty('diff-stops-circle', 'circle-stroke-opacity', freqDim
+      ? ['case', ['==', ['get', 'status'], 'unchanged'], 0.12, 0.25]
+      : ['case', ['==', ['get', 'status'], 'unchanged'], 0.45, 0.90]);
+    map.setPaintProperty('diff-ghost-circle', 'circle-opacity', freqDim ? 0.10 : 0.30);
+    map.setPaintProperty('diff-ghost-circle', 'circle-stroke-opacity', freqDim ? 0.12 : 0.35);
+    map.setPaintProperty('diff-arrow-line', 'line-opacity', freqDim ? 0.25 : 0.85);
+    // The geometry and frequency overlays share the same underlying shapes,
+    // so only one is shown at a time (picked via diffOverlay) to keep the
+    // map legible.
+    const geomVis = showDiffOverlay && diffOverlay === 'geometry' ? 'visible' : 'none';
     for (const id of [
       'diff-segments-unchanged-casing',
       'diff-segments-unchanged-line',
@@ -1047,9 +1224,12 @@ export default function MapView() {
       'diff-segments-added-casing',
       'diff-segments-added-line',
     ]) {
-      map.setLayoutProperty(id, 'visibility', vis);
+      map.setLayoutProperty(id, 'visibility', geomVis);
     }
-  }, [appMode, diffActive, ready, showStops]);
+    const freqVis = showDiffOverlay && diffOverlay === 'frequency' ? 'visible' : 'none';
+    map.setLayoutProperty('diff-frequency-casing', 'visibility', freqVis);
+    map.setLayoutProperty('diff-frequency-line', 'visibility', freqVis);
+  }, [appMode, diffActive, diffOverlay, ready, showStops]);
 
   // Fly to and highlight the focused diff stop (amber halo, same as timeline mode).
   useEffect(() => {
@@ -1081,11 +1261,13 @@ export default function MapView() {
     });
   }, [diffStopFocus, diffStatus, ready]);
 
-  // Highlight shapes from both feeds and fit bounds for the focused diff route.
+  // Highlight shapes from both feeds for the focused diff route (no camera
+  // move — see the diffRouteZoomToken effect below for the explicit zoom).
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready) return;
     if (!diffRouteFocus || diffStatus.kind !== 'ready' || !registrySnapshot) {
+      diffRouteBoundsRef.current = null;
       setSource(map, 'inspector-shape', emptyFC());
       setSource(map, 'inspector-route-stops', emptyFC());
       return;
@@ -1143,11 +1325,9 @@ export default function MapView() {
         if (lat < minLat) minLat = lat;
         if (lat > maxLat) maxLat = lat;
       }
-      map.fitBounds([[minLon, minLat], [maxLon, maxLat]], {
-        padding: 60,
-        duration: 600,
-        maxZoom: Math.max(map.getZoom(), 12),
-      });
+      diffRouteBoundsRef.current = [[minLon, minLat], [maxLon, maxLat]];
+    } else {
+      diffRouteBoundsRef.current = null;
     }
 
     // Collect stops served by the focused route on both sides.
@@ -1184,6 +1364,18 @@ export default function MapView() {
       .catch((err) => console.warn('diff inspector-route-stops failed', err));
     return () => { cancelled = true; };
   }, [diffRouteFocus, diffStatus, registrySnapshot, ready]);
+
+  // Explicit "Show full line" zoom, requested via the inspector button
+  // (requestDiffRouteZoom bumps diffRouteZoomToken). Uses whichever bounds
+  // the effect above last computed for the focused route.
+  useEffect(() => {
+    if (diffRouteZoomToken === 0) return; // skip the initial mount
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    const bounds = diffRouteBoundsRef.current;
+    if (!bounds) return;
+    map.fitBounds(bounds, { padding: 60, duration: 600, maxZoom: Math.max(map.getZoom(), 12) });
+  }, [diffRouteZoomToken, ready]);
 
   const setMapStyle = useAppStore((s) => s.setMapStyle);
 

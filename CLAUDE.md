@@ -1,6 +1,6 @@
 # GiTFS — agent context
 
-Git-like **diff**, **timeline**, and **scenario** workflows for **GTFS** transit feeds in the browser (thesis project: longitudinal analysis of Austrian regional networks). No backend required; feeds are unpacked, queried, and persisted client-side.
+Git-like **diff** and **timeline** workflows for **GTFS** transit feeds in the browser (thesis project: longitudinal analysis of Austrian regional networks). No backend required; feeds are unpacked, queried, and persisted client-side.
 
 For user-facing setup and roadmap, see [`README.md`](./README.md) and [`PLAN.md`](./PLAN.md).
 

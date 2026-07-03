@@ -4,6 +4,7 @@
 // lists. Mode-specific wrappers (see `StopCard.tsx`, `RouteCard.tsx`,
 // `diff/DiffInspector.tsx`) compose these primitives.
 
+import { useState } from 'react';
 import { MODE_COLOR, MODE_LABEL, type Mode } from '../gtfs/modes';
 import { DIFF_COLOR } from '../diff/geojson';
 import type { LineForStop } from '../gtfs/queries';
@@ -127,24 +128,35 @@ export function StopPill({
 /**
  * Small inspector section with a header row and a scrollable body. Used for
  * both the "Lines" block inside a stop card and the "Stops" block inside a
- * route card.
+ * route card. Pass `defaultCollapsed` for bulkier, secondary detail (e.g.
+ * raw A/B field tables, full stop lists) that clutters the card until the
+ * user asks for it; the header stays clickable to toggle either way.
  */
 export function InspectorSection({
   title,
   count,
   children,
+  defaultCollapsed,
 }: {
   title: string;
   count?: number | string;
   children: React.ReactNode;
+  defaultCollapsed?: boolean;
 }) {
+  const [open, setOpen] = useState(!defaultCollapsed);
   return (
     <div className="inspector-section">
-      <div className="inspector-section-head">
+      <button
+        type="button"
+        className="inspector-section-head"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+      >
+        <span className={`inspector-section-chevron${open ? ' open' : ''}`}>▸</span>
         <span>{title}</span>
         {count !== undefined && <span className="inspector-section-count">{count}</span>}
-      </div>
-      <div className="inspector-section-body">{children}</div>
+      </button>
+      {open && <div className="inspector-section-body">{children}</div>}
     </div>
   );
 }
