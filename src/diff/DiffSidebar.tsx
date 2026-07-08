@@ -258,6 +258,7 @@ export function DiffSidebar() {
                 padding: '4px 6px',
                 fontWeight: diffOverlay === 'geometry' ? 600 : 400,
                 background: diffOverlay === 'geometry' ? 'var(--accent-bg, #e2e8f0)' : undefined,
+                color: diffOverlay === 'geometry' ? '#0b1420' : undefined,
               }}
               title="Show which track geometry was added, removed, or kept"
             >
@@ -272,6 +273,7 @@ export function DiffSidebar() {
                 padding: '4px 6px',
                 fontWeight: diffOverlay === 'frequency' ? 600 : 400,
                 background: diffOverlay === 'frequency' ? 'var(--accent-bg, #e2e8f0)' : undefined,
+                color: diffOverlay === 'frequency' ? '#0b1420' : undefined,
               }}
               title="Show how weekly trip frequency changed per line"
             >
@@ -306,20 +308,39 @@ export function DiffSidebar() {
                   </label>
                 );
               })}
+              {(() => {
+                const rl = diffSegmentSummary
+                  && diffSegmentSummary.feedA === diff.result.feedA
+                  && diffSegmentSummary.feedB === diff.result.feedB
+                  ? diffSegmentSummary.routeLengths
+                  : null;
+                return (
+                  <div
+                    className="diff-count-note"
+                    style={{ fontSize: 11, opacity: 0.75, padding: '4px 6px', lineHeight: 1.4 }}
+                    title="Full length of routes whose identity was removed/added, even on streets still served by another line — shown on the map as a dashed outline over the shared, otherwise-grey corridor."
+                  >
+                    Line removed: {rl == null ? '…' : formatLengthKm(rl.removed)} · Line added:{' '}
+                    {rl == null ? '…' : formatLengthKm(rl.added)}
+                    <br />
+                    (full route length, incl. streets still served by another line — see dashed outline)
+                  </div>
+                );
+              })()}
             </div>
           )}
 
           {diffOverlay === 'frequency' && (() => {
             const freq = frequencySummaryFor(diffFrequencySummary, diff.result.feedA, diff.result.feedB);
             const scaleMax = freq ? Math.max(1, Math.round(freq.scaleAbsDelta)) : null;
-            // Colour/width max out at the p95 cap; when some route's change
+            // Colour maxes out at the p95 cap; when some route's change
             // exceeds it, the end labels become open-ended ("≥ …").
             const capped = freq != null && Math.round(freq.maxAbsDelta) > Math.round(freq.scaleAbsDelta);
             return (
               <div className="diff-frequency-legend" style={{ fontSize: 12 }}>
                 <p className="muted" style={{ marginTop: 0 }}>
                   Change in scheduled trips per week on each line, from A to B.
-                  Colour shows the direction, line width the size of the change.
+                  Colour shows both the direction and the size of the change.
                 </p>
                 <div
                   style={{

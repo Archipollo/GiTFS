@@ -11,13 +11,12 @@ export default function LeftPanel() {
   const compareFeedId = useAppStore((s) => s.compareFeedId);
   const setActive = useAppStore((s) => s.setActiveFeed);
   const removeFeed = useAppStore((s) => s.removeFeed);
-  const setTimelineYear = useAppStore((s) => s.setTimelineYear);
+  const setTimelineFeedId = useAppStore((s) => s.setTimelineFeedId);
 
   const pickActive = (id: string) => {
     setActive(id);
     if (mode === 'timeline') {
-      const meta = feeds[id];
-      if (meta) setTimelineYear(yearOfFeed(meta).year);
+      setTimelineFeedId(id);
     }
   };
 

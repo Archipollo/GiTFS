@@ -12,6 +12,8 @@ export interface FeedYear {
   feedId: string;
   /** The representative year (integer, e.g. 2024). */
   year: number;
+  /** The full date `year` was derived from — validity midpoint, or `loadedAt` when synthetic. */
+  repDate: Date;
   /** Optional validity span (from calendar/feed_info) — for tooltips only. */
   startDate?: Date;
   endDate?: Date;
@@ -55,19 +57,60 @@ export function yearOfFeed(meta: FeedMeta): FeedYear {
     const lo = Math.min(s, e);
     const hi = Math.max(s, e);
     const mid = Math.floor((lo + hi) / 2);
+    const midDate = dayToDate(mid);
     return {
       feedId: meta.id,
-      year: dayToDate(mid).getUTCFullYear(),
+      year: midDate.getUTCFullYear(),
+      repDate: midDate,
       startDate: dayToDate(lo),
       endDate: dayToDate(hi),
       synthetic: false,
     };
   }
+  const loadedDate = new Date(meta.loadedAt);
   return {
     feedId: meta.id,
-    year: new Date(meta.loadedAt).getUTCFullYear(),
+    year: loadedDate.getUTCFullYear(),
+    repDate: loadedDate,
     synthetic: true,
   };
+}
+
+/**
+ * Every loaded feed as a FeedYear, sorted chronologically. Unlike an
+ * approach that collapses to "one feed per year", this never drops a feed:
+ * when two feeds compute the same representative year (e.g. both fall back
+ * to `loadedAt` because neither has usable GTFS dates), they both stay in
+ * the list and are ordered by their precise validity date (or load time),
+ * not just the rounded year label.
+ */
+export function feedYearsOf(feedOrder: string[], feeds: Record<string, FeedMeta>): FeedYear[] {
+  const all = feedOrder
+    .map((id) => feeds[id])
+    .filter((f): f is FeedMeta => Boolean(f))
+    .map(yearOfFeed);
+  return all.sort((a, b) => a.repDate.getTime() - b.repDate.getTime());
+}
+
+/**
+ * Label each feed with just enough granularity to be unambiguous: the year,
+ * unless another feed shares that year (then add the month), unless a feed
+ * also shares that month (then add the day). Feeds that don't collide with
+ * anything keep the plain year, so the common case stays uncluttered.
+ */
+export function feedYearLabels(feedYears: FeedYear[]): string[] {
+  return feedYears.map((fy) => {
+    const sameYear = feedYears.filter((o) => o.year === fy.year);
+    if (sameYear.length <= 1) return String(fy.year);
+
+    const month = fy.repDate.getUTCMonth();
+    const sameMonth = sameYear.filter((o) => o.repDate.getUTCMonth() === month);
+    const mm = String(month + 1).padStart(2, '0');
+    if (sameMonth.length <= 1) return `${fy.year}-${mm}`;
+
+    const dd = String(fy.repDate.getUTCDate()).padStart(2, '0');
+    return `${fy.year}-${mm}-${dd}`;
+  });
 }
 
 /** Inclusive [minYear, maxYear] across all feeds, or null when none are loaded. */

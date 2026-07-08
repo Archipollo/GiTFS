@@ -321,7 +321,11 @@ function DiffRouteCard({
   const setDiffStopFocus = useAppStore((s) => s.setDiffStopFocus);
   const diffStopFocus = useAppStore((s) => s.diffStopFocus);
   const diffRouteCandidates = useAppStore((s) => s.diffRouteCandidates);
+  const diffRouteFocusGeomStatus = useAppStore((s) => s.diffRouteFocusGeomStatus);
   const requestDiffRouteZoom = useAppStore((s) => s.requestDiffRouteZoom);
+  const diffRoutesWithGeomChange = useAppStore((s) => s.diffRoutesWithGeomChange);
+  const geomChangedElsewhere =
+    entry.status === 'unchanged' && !!diffRoutesWithGeomChange?.has(entry.canonicalId);
 
   const otherCandidates = diffRouteCandidates
     .filter((cid) => cid !== entry.canonicalId)
@@ -352,7 +356,7 @@ function DiffRouteCard({
     <div className="inspector-card">
       <div className="inspector-card-head">
         <div className="inspector-card-kind">Line</div>
-        <StatusBadge status={entry.status} />
+        {!geomChangedElsewhere && <StatusBadge status={entry.status} />}
         <div className="inspector-card-head-actions">
           <button
             type="button"
@@ -386,6 +390,19 @@ function DiffRouteCard({
       {entry.renumbering && (
         <div className="muted" style={{ marginTop: 4 }}>
           Renumbered: <code>{entry.renumbering.fromCanonicalId}</code> → <code>{entry.renumbering.toCanonicalId}</code>
+        </div>
+      )}
+      {diffRouteFocusGeomStatus && diffRouteFocusGeomStatus !== 'unchanged' && (
+        <div
+          className="diff-status-badge"
+          style={{
+            marginTop: 4,
+            background: `${DIFF_COLOR[diffRouteFocusGeomStatus]}22`,
+            color: DIFF_COLOR[diffRouteFocusGeomStatus],
+            borderColor: `${DIFF_COLOR[diffRouteFocusGeomStatus]}55`,
+          }}
+        >
+          {diffRouteFocusGeomStatus === 'added' ? 'different path' : 'no longer used here'}
         </div>
       )}
 

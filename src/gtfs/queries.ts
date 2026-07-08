@@ -17,6 +17,8 @@ export interface ShapePolyline {
   coords: [number, number][]; // [lon, lat]
   modes: Mode[];
   primary_mode: Mode;
+  /** Most-tripped route_id using this shape (empty string if none found). */
+  route_id: string;
 }
 
 /** Row shape for "lines served by this stop" — one row per route. */
@@ -128,6 +130,7 @@ export async function fetchShapes(feedId: string): Promise<ShapePolyline[]> {
     const hasRoutes = await tableExists(conn, feedId, 'routes');
 
     const shapeRouteTypes = new Map<string, Set<number>>();
+    const shapeDominantRoute = new Map<string, string>();
     if (hasTrips && hasRoutes) {
       const tr = qualifiedTable(feedId, 'trips.txt');
       const rt = qualifiedTable(feedId, 'routes.txt');
@@ -145,6 +148,22 @@ export async function fetchShapes(feedId: string): Promise<ShapePolyline[]> {
         let set = shapeRouteTypes.get(id);
         if (!set) { set = new Set(); shapeRouteTypes.set(id, set); }
         set.add(rtVal);
+      }
+
+      // Most-tripped route per shape — same "pick one owner" convention as
+      // `fetchShapeRouteMap`, used to attach a single route_id to each
+      // polyline for the diff overlay's route-identity cross-check.
+      const domRes = await conn.query(`
+        SELECT shape_id, route_id, COUNT(*)::INTEGER AS n
+        FROM ${tr}
+        WHERE shape_id IS NOT NULL
+        GROUP BY shape_id, route_id
+        ORDER BY shape_id, n DESC
+      `);
+      for (const row of domRes.toArray()) {
+        const id = row.shape_id == null ? '' : String(row.shape_id);
+        if (!id || shapeDominantRoute.has(id)) continue;
+        shapeDominantRoute.set(id, String(row.route_id));
       }
     }
 
@@ -171,6 +190,7 @@ export async function fetchShapes(feedId: string): Promise<ShapePolyline[]> {
         coords,
         modes,
         primary_mode: modes.length ? primaryMode(modes) : 'other',
+        route_id: shapeDominantRoute.get(shape_id) ?? '',
       };
     });
   } finally {

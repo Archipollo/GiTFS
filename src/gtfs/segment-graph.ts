@@ -8,7 +8,7 @@
 // pass on the main thread.
 
 import { type Mode, MODES } from './modes';
-import { fetchShapes } from './queries';
+import { fetchShapes, fetchShapeRouteMap } from './queries';
 import {
   buildShapeIndex,
   diffShapes,
@@ -16,13 +16,29 @@ import {
   type DiffedRun,
   type DiffedShapes,
   type GeomStatus,
+  type RoutePair,
 } from './segment-core';
 import type { ShapePolyline } from './queries';
+import type { DiffResult } from '../diff/engine';
 
 // Re-export types and pure computation for consumers that don't need
 // the caching layer (e.g. tests, the worker itself).
-export type { DiffedRun, DiffedShapes, GeomStatus, ShapeIndex } from './segment-core';
+export type { DiffedRun, DiffedShapes, GeomStatus, RoutePair, ShapeIndex } from './segment-core';
 export { buildShapeIndex, diffShapes };
+
+/**
+ * Map each canonical route from the entity diff to the raw route_ids that
+ * scope its "tube map" geometry comparison. An empty side means that side
+ * has no counterpart (route added/removed) — `diffShapesByRoute` treats
+ * that as a trivial whole-shape added/removed, no buffer-overlay needed.
+ */
+export function buildRoutePairs(result: DiffResult): RoutePair[] {
+  return result.routes.map((entry) => ({
+    canonicalId: entry.canonicalId,
+    aRawIds: entry.a?.rawIds ?? [],
+    bRawIds: entry.b?.rawIds ?? [],
+  }));
+}
 
 /** Palette shared by the diff map layers and the sidebar swatches. */
 export const SEGMENT_COLOR: Record<GeomStatus, string> = {
@@ -36,21 +52,26 @@ export const SEGMENT_COLOR: Record<GeomStatus, string> = {
 export interface FeedShapes {
   feedId: string;
   shapes: readonly ShapePolyline[];
+  /** shape_id -> route_id[] membership (many-to-many; see `fetchShapeRouteMap`). */
+  shapeRouteMap: Map<string, string[]>;
 }
 
 const indexCache = new Map<string, Promise<FeedShapes>>();
 
 /**
- * Cached per-feed shape fetch. This intentionally returns only
- * `{feedId, shapes}` so the heavy segment index build stays off the
- * main thread inside the worker.
+ * Cached per-feed shape fetch. This intentionally returns only plain
+ * data (shapes + shape/route membership) so the heavy segment index
+ * build stays off the main thread inside the worker.
  */
 export function getShapeIndex(feedId: string): Promise<FeedShapes> {
   const hit = indexCache.get(feedId);
   if (hit) return hit;
   const p = (async () => {
-    const shapes = await fetchShapes(feedId);
-    return { feedId, shapes } as FeedShapes;
+    const [shapes, shapeRouteMap] = await Promise.all([
+      fetchShapes(feedId),
+      fetchShapeRouteMap(feedId),
+    ]);
+    return { feedId, shapes, shapeRouteMap } as FeedShapes;
   })().catch((err) => {
     indexCache.delete(feedId);
     throw err;
@@ -94,24 +115,41 @@ function getDiffWorker(): Worker {
 
 // ---- Pair-level diff cache -----------------------------------------
 
-const diffCache = new Map<string, Map<string, Promise<DiffedShapes>>>();
+interface DiffCacheEntry {
+  /** Registry snapshot version the route pairs were computed from — a
+   *  registry rebuild (re-matching) invalidates the entry even though
+   *  (feedA, feedB) haven't changed. */
+  registryBuiltAt: number;
+  promise: Promise<DiffedShapes>;
+}
+
+const diffCache = new Map<string, Map<string, DiffCacheEntry>>();
 
 /**
- * Compute and cache the buffer-overlay diff for a feed pair. The
- * expensive GIS work runs in a Web Worker so the main thread stays
- * responsive. Calling again with the same (feedA, feedB) pair returns
- * the cached Promise immediately — even while the first computation
- * is still in flight — so React effects that fire multiple times
- * never duplicate the work.
+ * Compute and cache the route-scoped buffer-overlay diff for a feed
+ * pair. The expensive GIS work runs in a Web Worker so the main thread
+ * stays responsive. Calling again with the same (feedA, feedB) pair and
+ * registry version returns the cached Promise immediately — even while
+ * the first computation is still in flight — so React effects that fire
+ * multiple times never duplicate the work. `pairs` is the route-identity
+ * correspondence from `buildRoutePairs`/the entity diff — see
+ * `diffShapesByRoute` in segment-core.ts for how it scopes the diff.
  */
-export function getDiffedShapes(idxA: FeedShapes, idxB: FeedShapes): Promise<DiffedShapes> {
+export function getDiffedShapes(
+  idxA: FeedShapes,
+  idxB: FeedShapes,
+  pairs: readonly RoutePair[],
+  registryBuiltAt: number,
+): Promise<DiffedShapes> {
   let byB = diffCache.get(idxA.feedId);
   if (!byB) {
-    byB = new Map<string, Promise<DiffedShapes>>();
+    byB = new Map<string, DiffCacheEntry>();
     diffCache.set(idxA.feedId, byB);
   }
   const hit = byB.get(idxB.feedId);
-  if (hit) return hit;
+  if (hit && hit.registryBuiltAt === registryBuiltAt) return hit.promise;
+
+  let selfRef!: Promise<DiffedShapes>;
   const p = new Promise<DiffedShapes>((resolve, reject) => {
     const id = ++_msgId;
     _pending.set(id, { resolve, reject });
@@ -122,14 +160,20 @@ export function getDiffedShapes(idxA: FeedShapes, idxB: FeedShapes): Promise<Dif
       // Structured-clone the shapes to the worker (serialisable plain objects).
       shapesA: idxA.shapes,
       shapesB: idxB.shapes,
+      shapeRouteMapA: [...idxA.shapeRouteMap],
+      shapeRouteMapB: [...idxB.shapeRouteMap],
+      pairs,
     });
   }).catch((err) => {
     const mapForA = diffCache.get(idxA.feedId);
-    mapForA?.delete(idxB.feedId);
-    if (mapForA && mapForA.size === 0) diffCache.delete(idxA.feedId);
+    if (mapForA?.get(idxB.feedId)?.promise === selfRef) {
+      mapForA.delete(idxB.feedId);
+      if (mapForA.size === 0) diffCache.delete(idxA.feedId);
+    }
     throw err;
   });
-  byB.set(idxB.feedId, p);
+  selfRef = p;
+  byB.set(idxB.feedId, { registryBuiltAt, promise: p });
   return p;
 }
 
@@ -155,10 +199,26 @@ export interface SegmentLengths {
   unchanged: number;
 }
 
+/**
+ * Full shape length (metres) of routes whose *identity* was removed/added,
+ * regardless of whether their corridor is still physically covered by
+ * another route (in which case `SegmentLengths` would classify most of it
+ * as `unchanged`). Driven by `lineStatus` in `segmentDiffToGeoJSON`.
+ */
+export interface RouteLineLengths {
+  removed: number;
+  added: number;
+}
+
 export interface SegmentDiff {
   features: GeoJSON.FeatureCollection;
   lengths: SegmentLengths;
+  routeLengths: RouteLineLengths;
 }
+
+/** 'removed' | 'added' route-identity status for the route owning a run, or
+ * null if that route's identity is unchanged/modified/renumbered. */
+export type RunLineStatus = 'removed' | 'added' | null;
 
 function modeFlags(modes: readonly Mode[]): Record<string, boolean> {
   const effective = modes.length ? modes : (['other'] as Mode[]);
@@ -176,31 +236,72 @@ function modeFlags(modes: readonly Mode[]): Record<string, boolean> {
  *
  * `accept` is applied to both features *and* lengths, so mode-filter
  * toggles keep the two in lock-step.
+ *
+ * `lineStatus`, if given, looks up the route-*identity* status (removed/
+ * added/null) of the route that owns each run — independent of `geom_status`,
+ * which only reflects whether the physical corridor is still covered by
+ * *some* route. A run can be `geom_status: 'unchanged'` (its street is still
+ * served) while `lineStatus` says `'removed'` (this particular route is
+ * gone) — e.g. one of two lines sharing a street was cut. `routeLengths`
+ * sums each run's full shape length by that identity status, so a fully-cut
+ * route counts its whole length as removed even though most of its corridor
+ * reads `unchanged` in `lengths`.
+ *
+ * A shape legitimately owned by two canonical routes is diffed once per
+ * canonical (see `diffShapesByRoute`) and so can appear twice with an
+ * identical run (same feed/shape_id/status/start/end). `lengthKey`
+ * dedupes exact-duplicate runs (skipped from both lengths and features)
+ * while still separately counting/drawing genuinely distinct same-status
+ * runs on one shape (e.g. an unchanged-removed-unchanged split has two
+ * different unchanged runs with different bounds).
  */
+function lengthKey(run: DiffedRun): string {
+  const first = run.coords[0];
+  const last = run.coords[run.coords.length - 1];
+  return `${run.feed}\t${run.shape_id}\t${run.status}\t${first[0]},${first[1]}\t${last[0]},${last[1]}`;
+}
+
 export function segmentDiffToGeoJSON(
   diff: DiffedShapes,
   visibility: Record<GeomStatus, boolean>,
   accept: (r: DiffedRun) => boolean = () => true,
+  lineStatus: (r: DiffedRun) => RunLineStatus = () => null,
 ): SegmentDiff {
   const features: GeoJSON.Feature[] = [];
   const lengths: SegmentLengths = { added: 0, removed: 0, unchanged: 0 };
+  const routeLengths: RouteLineLengths = { added: 0, removed: 0 };
+  const seenLength = new Set<string>();
   for (const run of diff.runs) {
     if (!accept(run)) continue;
-    lengths[run.status] += lineLengthM(run.coords);
+    const lk = lengthKey(run);
+    const isDupe = seenLength.has(lk);
+    if (!isDupe) seenLength.add(lk);
+    // `unchanged` runs are emitted from both feeds for the same physical
+    // corridor (see classifyAndEmit) so route identity can be
+    // cross-referenced on the B side too; only count the A-side copy here
+    // to avoid doubling the "shared geometry" length total.
+    if (!isDupe && (run.status !== 'unchanged' || run.feed === 'a')) {
+      lengths[run.status] += lineLengthM(run.coords);
+    }
+    const ls = lineStatus(run);
+    if (ls && !isDupe) routeLengths[ls] += lineLengthM(run.coords);
     if (!visibility[run.status]) continue;
+    if (isDupe) continue; // avoid drawing the same duplicate-owned-shape run twice
     features.push({
       type: 'Feature',
       geometry: { type: 'LineString', coordinates: run.coords },
       properties: {
         geom_status: run.status,
+        line_status: ls ?? 'none',
         shape_id: run.shape_id,
+        route_id: run.route_id,
         feed: run.feed,
         primary_mode: run.primary_mode,
         ...modeFlags(run.modes),
       },
     });
   }
-  return { features: { type: 'FeatureCollection', features }, lengths };
+  return { features: { type: 'FeatureCollection', features }, lengths, routeLengths };
 }
 
 /**

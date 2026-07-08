@@ -131,9 +131,13 @@ export interface AppState {
   setRegistryFocus: (f: RegistryFocus | null) => void;
 
   // Timeline mode ----------------------------------------------------------
-  /** Selected year (integer). Null until feeds are known; then snaps to one of them. */
-  timelineYear: number | null;
-  setTimelineYear: (year: number | null) => void;
+  /**
+   * Selected feed (by id), not year — two feeds can share a representative
+   * year, so the year alone can't identify which one is selected. Null
+   * until feeds are known; then snaps to one of them.
+   */
+  timelineFeedId: string | null;
+  setTimelineFeedId: (feedId: string | null) => void;
 
   /** Pinned canonical entities whose histories are shown in the inspector across years. */
   pinnedEntities: PinnedEntity[];
@@ -195,11 +199,21 @@ export interface AppState {
    * spatial-grid pass twice.
    */
   diffSegmentSummary:
-    | { feedA: string; feedB: string; lengths: Record<GeomStatus, number> }
+    | {
+        feedA: string;
+        feedB: string;
+        lengths: Record<GeomStatus, number>;
+        routeLengths: { removed: number; added: number };
+      }
     | null;
   setDiffSegmentSummary: (
     s:
-      | { feedA: string; feedB: string; lengths: Record<GeomStatus, number> }
+      | {
+          feedA: string;
+          feedB: string;
+          lengths: Record<GeomStatus, number>;
+          routeLengths: { removed: number; added: number };
+        }
       | null,
   ) => void;
   diffRouteVisibility: Record<RouteStatus, boolean>;
@@ -222,9 +236,31 @@ export interface AppState {
    * clicking a line no longer commits to just the topmost one.
    */
   diffRouteCandidates: string[];
+  /**
+   * `geom_status` of the map segment that was actually clicked to set
+   * `diffRouteFocus`, when known. Distinct from the route's own entity
+   * status (added/removed/modified/unchanged): a route can be identity-
+   * `unchanged` while this particular stretch of its path is new or
+   * removed geometry (a reroute). Lets the inspector flag that mismatch
+   * instead of presenting them as if they were the same thing.
+   */
+  diffRouteFocusGeomStatus: 'unchanged' | 'added' | 'removed' | null;
+  /**
+   * Canonical route ids that have at least one non-`unchanged` geometry run
+   * somewhere along their path, computed once per feed pair from the
+   * segment diff. A route can be identity-`unchanged` yet have taken a
+   * different path on some stretch — the inspector uses this to avoid
+   * calling such a route "unchanged" when its geometry plainly isn't.
+   */
+  diffRoutesWithGeomChange: Set<string> | null;
+  setDiffRoutesWithGeomChange: (s: Set<string> | null) => void;
   setDiffStopFocus: (canonicalId: string | null) => void;
   /** `candidates` defaults to `[canonicalId]` when omitted or null is passed. */
-  setDiffRouteFocus: (canonicalId: string | null, candidates?: string[]) => void;
+  setDiffRouteFocus: (
+    canonicalId: string | null,
+    candidates?: string[],
+    geomStatus?: 'unchanged' | 'added' | 'removed' | null,
+  ) => void;
   clearDiffFocus: () => void;
   /**
    * Bumped to request that MapView zoom/fit the camera to the full extent of
@@ -272,7 +308,12 @@ export const useAppStore = create<AppState>((set) => ({
   mode: 'timeline',
   setMode: (mode) =>
     set((s) => {
-      const cleared = { diffStopFocus: null, diffRouteFocus: null, diffRouteCandidates: [] as string[] };
+      const cleared = {
+        diffStopFocus: null,
+        diffRouteFocus: null,
+        diffRouteCandidates: [] as string[],
+        diffRouteFocusGeomStatus: null as 'unchanged' | 'added' | 'removed' | null,
+      };
       if (mode !== 'diff') return { mode, ...cleared };
       if (s.feedOrder.length < 2) return { mode, compareFeedId: null, ...cleared };
       // Preserve an explicit pair the user already set up via the diff
@@ -373,8 +414,8 @@ export const useAppStore = create<AppState>((set) => ({
   registryFocus: null,
   setRegistryFocus: (registryFocus) => set({ registryFocus }),
 
-  timelineYear: null,
-  setTimelineYear: (timelineYear) => set({ timelineYear }),
+  timelineFeedId: null,
+  setTimelineFeedId: (timelineFeedId) => set({ timelineFeedId }),
 
   pinnedEntities: [],
   addPinnedEntity: (p) =>
@@ -432,13 +473,22 @@ export const useAppStore = create<AppState>((set) => ({
   diffStopFocus: null,
   diffRouteFocus: null,
   diffRouteCandidates: [],
+  diffRouteFocusGeomStatus: null,
+  diffRoutesWithGeomChange: null,
+  setDiffRoutesWithGeomChange: (diffRoutesWithGeomChange) => set({ diffRoutesWithGeomChange }),
   setDiffStopFocus: (diffStopFocus) => set({ diffStopFocus }),
-  setDiffRouteFocus: (diffRouteFocus, candidates) =>
+  setDiffRouteFocus: (diffRouteFocus, candidates, geomStatus) =>
     set({
       diffRouteFocus,
       diffRouteCandidates: diffRouteFocus == null ? [] : candidates ?? [diffRouteFocus],
+      diffRouteFocusGeomStatus: diffRouteFocus == null ? null : geomStatus ?? null,
     }),
-  clearDiffFocus: () => set({ diffStopFocus: null, diffRouteFocus: null, diffRouteCandidates: [] }),
+  clearDiffFocus: () => set({
+    diffStopFocus: null,
+    diffRouteFocus: null,
+    diffRouteCandidates: [],
+    diffRouteFocusGeomStatus: null,
+  }),
   diffRouteZoomToken: 0,
   requestDiffRouteZoom: () => set((s) => ({ diffRouteZoomToken: s.diffRouteZoomToken + 1 })),
 

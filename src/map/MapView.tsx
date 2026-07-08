@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import maplibregl, {
   Map as MapLibreMap,
   type ExpressionSpecification,
@@ -20,6 +20,7 @@ import MapOverlay from './MapOverlay';
 import { useRegistry } from '../registry/useRegistry';
 import { lookupStop, lookupRoute } from '../registry/registry';
 import { useDiff } from '../diff/useDiff';
+import { buildRouteStatusByRawId, type DiffResult } from '../diff/engine';
 import {
   DIFF_COLOR,
   diffMoveArrows,
@@ -28,6 +29,7 @@ import {
 } from '../diff/geojson';
 import {
   SEGMENT_COLOR,
+  buildRoutePairs,
   dropDiffCache,
   dropShapeIndex,
   getDiffedShapes,
@@ -36,6 +38,7 @@ import {
   segmentDiffToGeoJSON,
   type DiffedRun,
   type DiffedShapes,
+  type RunLineStatus,
 } from '../gtfs/segment-graph';
 import {
   FREQUENCY_GAIN_COLOR,
@@ -84,8 +87,8 @@ const DIFF_SEGMENT_LINE_LAYERS = [
 // Frequency overlay: `delta_norm` is the trips/week delta scaled to [-1, 1]
 // by the diff's robust p95 cap (see `frequencyDiffToGeoJSON`), so a fixed
 // domain here works across any feed pair. Diverging amber (loss) → grey (no
-// change) → blue (gain); width tracks |delta_norm| the same way so a big
-// change reads as both bolder in colour and thicker.
+// change) → blue (gain); width is constant (zoom-only) so colour is the sole
+// signal for magnitude.
 const FREQUENCY_COLOR_EXPR: ExpressionSpecification = [
   'interpolate',
   ['linear'],
@@ -94,12 +97,23 @@ const FREQUENCY_COLOR_EXPR: ExpressionSpecification = [
   0, FREQUENCY_NEUTRAL_COLOR,
   1, FREQUENCY_GAIN_COLOR,
 ];
+// Width is constant across routes — only colour encodes delta magnitude, so
+// unchanged and heavily-changed routes are the same thickness on the map.
 const FREQUENCY_WIDTH_EXPR: ExpressionSpecification = [
   'interpolate',
   ['linear'],
-  ['abs', ['get', 'delta_norm']],
-  0, FREQUENCY_MIN_WIDTH,
-  1, FREQUENCY_MAX_WIDTH,
+  ['zoom'],
+  8, FREQUENCY_MIN_WIDTH,
+  14, FREQUENCY_MAX_WIDTH,
+];
+// Casing sits 2px wider than the line at every zoom; kept as its own
+// top-level interpolate since `zoom` can't be nested inside `+`.
+const FREQUENCY_CASING_WIDTH_EXPR: ExpressionSpecification = [
+  'interpolate',
+  ['linear'],
+  ['zoom'],
+  8, FREQUENCY_MIN_WIDTH + 2,
+  14, FREQUENCY_MAX_WIDTH + 2,
 ];
 
 const CARTO_ATTR = '© OpenStreetMap contributors, © CARTO';
@@ -259,6 +273,9 @@ export default function MapView() {
   // for the "Show full line" button — clicking a line highlights it in
   // place without moving the camera; only this explicit action zooms.
   const diffRouteBoundsRef = useRef<maplibregl.LngLatBoundsLike | null>(null);
+  // Live mirror of the current diff result for use inside map click handlers,
+  // which are registered once on map load and can't close over hook state.
+  const diffResultRef = useRef<DiffResult | null>(null);
 
   const ensureFeedRender = useCallback(async (feedId: string): Promise<FeedRender> => {
     const cached = cacheRef.current.get(feedId);
@@ -339,7 +356,11 @@ export default function MapView() {
         id: 'diff-segments-unchanged-casing',
         type: 'line',
         source: 'diff-segments',
-        filter: ['==', ['get', 'geom_status'], 'unchanged'],
+        // `unchanged` runs are emitted from both feeds for the same corridor
+        // (see segment-core.ts classifyAndEmit) so route identity can be
+        // cross-referenced on the B side too — only draw the A-side copy
+        // here or every shared street would be drawn twice.
+        filter: ['all', ['==', ['get', 'geom_status'], 'unchanged'], ['==', ['get', 'feed'], 'a']],
         layout: { 'line-cap': 'round', 'line-join': 'round' },
         paint: {
           'line-color': '#ffffff',
@@ -351,7 +372,7 @@ export default function MapView() {
         id: 'diff-segments-unchanged-line',
         type: 'line',
         source: 'diff-segments',
-        filter: ['==', ['get', 'geom_status'], 'unchanged'],
+        filter: ['all', ['==', ['get', 'geom_status'], 'unchanged'], ['==', ['get', 'feed'], 'a']],
         layout: { 'line-cap': 'round', 'line-join': 'round' },
         paint: {
           'line-color': SEGMENT_COLOR.unchanged,
@@ -407,6 +428,36 @@ export default function MapView() {
           'line-opacity': 0.95,
         },
       });
+      // Route-identity overlay: a dashed outline drawn on top of `unchanged`
+      // corridor segments whose owning route was itself removed/added — e.g.
+      // one of two lines sharing a street was cut. The base grey line still
+      // reads "street still served"; this outline adds "but this line
+      // wasn't the one still serving it". geom_status removed/added runs
+      // already read unambiguously (solid red/green), so this only fires
+      // where geom_status is 'unchanged'.
+      map.addLayer({
+        id: 'diff-segments-line-status-outline',
+        type: 'line',
+        source: 'diff-segments',
+        filter: [
+          'all',
+          ['==', ['get', 'geom_status'], 'unchanged'],
+          ['in', ['get', 'line_status'], ['literal', ['removed', 'added']]],
+        ],
+        layout: { 'line-cap': 'round', 'line-join': 'round' },
+        paint: {
+          'line-color': [
+            'match',
+            ['get', 'line_status'],
+            'removed', SEGMENT_COLOR.removed,
+            'added', SEGMENT_COLOR.added,
+            '#94a3b8',
+          ],
+          'line-width': ['interpolate', ['linear'], ['zoom'], 8, 1.6, 14, 3.2],
+          'line-dasharray': [1.5, 1.5],
+          'line-opacity': 0.9,
+        },
+      });
       // Frequency overlay: one line per matched route, colour+width driven
       // by `delta_norm` (see FREQUENCY_COLOR_EXPR / FREQUENCY_WIDTH_EXPR).
       // Hidden unless diffOverlay === 'frequency' (visibility effect below).
@@ -417,7 +468,7 @@ export default function MapView() {
         layout: { 'line-cap': 'round', 'line-join': 'round' },
         paint: {
           'line-color': '#ffffff',
-          'line-width': ['+', FREQUENCY_WIDTH_EXPR, 2],
+          'line-width': FREQUENCY_CASING_WIDTH_EXPR,
           'line-opacity': 0.55,
         },
       });
@@ -551,16 +602,8 @@ export default function MapView() {
           'circle-color': DIFF_COLOR_EXPR,
           'circle-stroke-color': '#ffffff',
           'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 8, 0.8, 14, 1.8],
-          'circle-opacity': [
-            'case',
-            ['==', ['get', 'status'], 'unchanged'], 0.55,
-            0.95,
-          ],
-          'circle-stroke-opacity': [
-            'case',
-            ['==', ['get', 'status'], 'unchanged'], 0.45,
-            0.90,
-          ],
+          'circle-opacity': 0.95,
+          'circle-stroke-opacity': 0.90,
         },
       });
       map.on('mouseenter', 'diff-stops-circle', () => {
@@ -600,10 +643,21 @@ export default function MapView() {
           if (!f) return;
           const clickedPick = resolveClickedRun(f.properties ?? {}, a, b);
           if (!clickedPick) return;
+          const clickedGeomStatus = f.properties?.geom_status as 'unchanged' | 'added' | 'removed' | undefined;
 
+          // Keep the "sibling lines at this click" search radius roughly
+          // constant in real-world distance rather than screen pixels. A
+          // fixed pixel radius covers far more ground at low zoom, which
+          // was pulling in unrelated nearby corridors as false candidates
+          // (and letting their route status win the modified-line
+          // precedence below even though they weren't actually clicked).
+          const metersPerPixel =
+            (156543.03392 * Math.cos((evt.lngLat.lat * Math.PI) / 180)) / Math.pow(2, map.getZoom());
+          const targetMeters = 8;
+          const radiusPx = Math.min(4, Math.max(1, targetMeters / metersPerPixel));
           const bbox: [PointLike, PointLike] = [
-            [evt.point.x - 4, evt.point.y - 4],
-            [evt.point.x + 4, evt.point.y + 4],
+            [evt.point.x - radiusPx, evt.point.y - radiusPx],
+            [evt.point.x + radiusPx, evt.point.y + radiusPx],
           ];
           const allFeatures = map.queryRenderedFeatures(bbox, { layers: DIFF_SEGMENT_LINE_LAYERS });
           const picks = allFeatures
@@ -631,7 +685,17 @@ export default function MapView() {
                 }
               }
               if (!clickedCanonical) return;
-              useAppStore.getState().setDiffRouteFocus(clickedCanonical, [...candidateSet]);
+              // When several lines share this segment, a "modified" line is the
+              // most informative one to focus — prefer it over whichever
+              // feature happened to render on top at the click point.
+              const routeStatus = diffResultRef.current?.routes;
+              if (routeStatus) {
+                const modifiedCandidate = [...candidateSet].find(
+                  (cid) => routeStatus.find((r) => r.canonicalId === cid)?.status === 'modified',
+                );
+                if (modifiedCandidate) clickedCanonical = modifiedCandidate;
+              }
+              useAppStore.getState().setDiffRouteFocus(clickedCanonical, [...candidateSet], clickedGeomStatus ?? null);
             })
             .catch((err) => console.warn('segment → route resolve failed', err));
         });
@@ -1048,6 +1112,10 @@ export default function MapView() {
   // of the two feeds — we run it as an effect that re-runs on every input
   // and cancels stale work.
   useEffect(() => {
+    diffResultRef.current = diffStatus.kind === 'ready' ? diffStatus.result : null;
+  }, [diffStatus]);
+
+  useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready) return;
     if (diffStatus.kind !== 'ready') {
@@ -1073,6 +1141,8 @@ export default function MapView() {
     let cancelled = false;
     const feedA = diffStatus.feedA;
     const feedB = diffStatus.feedB;
+    const pairs = buildRoutePairs(diffStatus.result);
+    const registryBuiltAt = diffStatus.result.builtAt;
     (async () => {
       try {
         const [idxA, idxB] = await Promise.all([
@@ -1081,7 +1151,7 @@ export default function MapView() {
         ]);
         if (cancelled) return;
         const t0 = performance.now();
-        const diffed = await getDiffedShapes(idxA, idxB);
+        const diffed = await getDiffedShapes(idxA, idxB, pairs, registryBuiltAt);
         if (cancelled) return;
         const dtMs = Math.round(performance.now() - t0);
         console.info('[diff-segments] computed', {
@@ -1091,13 +1161,28 @@ export default function MapView() {
           dtMs,
         });
         setDiffedShapes(diffed);
+        const changed = new Set<string>();
+        for (const run of diffed.runs) {
+          if (run.status !== 'unchanged' && run.canonicalId) changed.add(run.canonicalId);
+        }
+        useAppStore.getState().setDiffRoutesWithGeomChange(changed);
       } catch (err) {
         if (!cancelled) console.warn('diff-segments compute failed', err);
       }
     })();
     return () => {
       cancelled = true;
+      useAppStore.getState().setDiffRoutesWithGeomChange(null);
     };
+  }, [diffStatus]);
+
+  // Per-feed (raw route_id -> RouteStatus) lookup, derived from the route
+  // identity diff. Lets the segment layer flag a run as belonging to a
+  // removed/added route even where its street corridor is still covered by
+  // another route (and so reads `geom_status: 'unchanged'`).
+  const routeStatusIndex = useMemo(() => {
+    if (diffStatus.kind !== 'ready') return null;
+    return buildRouteStatusByRawId(diffStatus.result);
   }, [diffStatus]);
 
   // Effect B — convert the cached diff result to GeoJSON for MapLibre.
@@ -1116,10 +1201,20 @@ export default function MapView() {
       const modes = r.modes.length ? r.modes : (['other'] as Mode[]);
       return modes.some((m) => activeModes.has(m));
     };
-    const { features, lengths } = segmentDiffToGeoJSON(
+    const lineStatus = (r: DiffedRun): RunLineStatus => {
+      if (!routeStatusIndex) return null;
+      const status = r.feed === 'a'
+        ? routeStatusIndex.a.get(r.route_id)
+        : routeStatusIndex.b.get(r.route_id);
+      if (r.feed === 'a' && status === 'removed') return 'removed';
+      if (r.feed === 'b' && status === 'added') return 'added';
+      return null;
+    };
+    const { features, lengths, routeLengths } = segmentDiffToGeoJSON(
       diffedShapes,
       diffSegmentVisibility,
       accept,
+      lineStatus,
     );
     console.info('[diff-segments] rendered', {
       features: features.features.length,
@@ -1128,13 +1223,23 @@ export default function MapView() {
         removed: Math.round(lengths.removed / 1000),
         unchanged: Math.round(lengths.unchanged / 1000),
       },
+      routeLengthsKm: {
+        added: Math.round(routeLengths.added / 1000),
+        removed: Math.round(routeLengths.removed / 1000),
+      },
     });
     setSource(map, 'diff-segments', features);
-    setDiffSegmentSummary({ feedA: diffedShapes.feedA, feedB: diffedShapes.feedB, lengths });
+    setDiffSegmentSummary({
+      feedA: diffedShapes.feedA,
+      feedB: diffedShapes.feedB,
+      lengths,
+      routeLengths,
+    });
   }, [
     diffedShapes,
     diffSegmentVisibility,
     modeVisibility,
+    routeStatusIndex,
     ready,
     setDiffSegmentSummary,
   ]);
@@ -1204,13 +1309,13 @@ export default function MapView() {
     // fighting for the same colour channel.
     const freqDim = diffOverlay === 'frequency';
     map.setPaintProperty('diff-stops-circle', 'circle-opacity', freqDim
-      ? ['case', ['==', ['get', 'status'], 'unchanged'], 0.15, 0.30]
-      : ['case', ['==', ['get', 'status'], 'unchanged'], 0.55, 0.95]);
+      ? ['case', ['==', ['get', 'status'], 'unchanged'], 0.35, 0.55]
+      : 0.95);
     map.setPaintProperty('diff-stops-circle', 'circle-stroke-opacity', freqDim
-      ? ['case', ['==', ['get', 'status'], 'unchanged'], 0.12, 0.25]
-      : ['case', ['==', ['get', 'status'], 'unchanged'], 0.45, 0.90]);
-    map.setPaintProperty('diff-ghost-circle', 'circle-opacity', freqDim ? 0.10 : 0.30);
-    map.setPaintProperty('diff-ghost-circle', 'circle-stroke-opacity', freqDim ? 0.12 : 0.35);
+      ? ['case', ['==', ['get', 'status'], 'unchanged'], 0.30, 0.45]
+      : 0.90);
+    map.setPaintProperty('diff-ghost-circle', 'circle-opacity', freqDim ? 0.25 : 0.30);
+    map.setPaintProperty('diff-ghost-circle', 'circle-stroke-opacity', freqDim ? 0.28 : 0.35);
     map.setPaintProperty('diff-arrow-line', 'line-opacity', freqDim ? 0.25 : 0.85);
     // The geometry and frequency overlays share the same underlying shapes,
     // so only one is shown at a time (picked via diffOverlay) to keep the
@@ -1223,6 +1328,7 @@ export default function MapView() {
       'diff-segments-removed-line',
       'diff-segments-added-casing',
       'diff-segments-added-line',
+      'diff-segments-line-status-outline',
     ]) {
       map.setLayoutProperty(id, 'visibility', geomVis);
     }
