@@ -20,6 +20,7 @@ import { useAppStore } from '../state/app-store';
 import { useDiff } from './useDiff';
 import type { DiffResult, StopDiffEntry, RouteDiffEntry, StopSide, RouteSide } from './engine';
 import { DIFF_COLOR } from './geojson';
+import { SEGMENT_COLOR } from '../gtfs/segment-graph';
 import { InspectorSection, LinePill, StopPill, ModeSwatch } from '../inspector/components';
 import { MODE_LABEL } from '../gtfs/modes';
 import { useDiffLinesForStop, useDiffStopsForRoute, type DiffRouteDirection, type DiffStopRow } from '../inspector/diff-data';
@@ -397,12 +398,14 @@ function DiffRouteCard({
           className="diff-status-badge"
           style={{
             marginTop: 4,
-            background: `${DIFF_COLOR[diffRouteFocusGeomStatus]}22`,
-            color: DIFF_COLOR[diffRouteFocusGeomStatus],
-            borderColor: `${DIFF_COLOR[diffRouteFocusGeomStatus]}55`,
+            background: `${SEGMENT_COLOR[diffRouteFocusGeomStatus]}22`,
+            color: SEGMENT_COLOR[diffRouteFocusGeomStatus],
+            borderColor: `${SEGMENT_COLOR[diffRouteFocusGeomStatus]}55`,
           }}
         >
-          {diffRouteFocusGeomStatus === 'added' ? 'different path' : 'no longer used here'}
+          {diffRouteFocusGeomStatus === 'added' ? 'new track — only in feed B'
+            : diffRouteFocusGeomStatus === 'changed' ? 'rerouted — old and new path nearby'
+            : 'removed track — only in feed A'}
         </div>
       )}
 

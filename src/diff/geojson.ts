@@ -12,12 +12,23 @@
 import type { DiffResult, StopStatus, StopDiffEntry } from './engine';
 
 export const DIFF_COLOR: Record<StopStatus, string> = {
-  added: '#16a34a',    // green-600 — matches SEGMENT_COLOR.added for visual unity
-  removed: '#dc2626',  // red-600  — matches SEGMENT_COLOR.removed for visual unity
-  moved: '#fbbf24',    // var(--modified)
-  renamed: '#60a5fa',  // a softer accent
-  unchanged: '#6b7280',
+  added: '#2ecc71',    // matches SEGMENT_COLOR.added for visual unity
+  removed: '#e74c3c',  // matches SEGMENT_COLOR.removed for visual unity
+  moved: '#f1c40f',    // yellow — matches SEGMENT_COLOR.changed (rerouted geometry)
+  renamed: '#2d6cdf',  // = --accent — a rename doesn't move anything on the map
+  unchanged: '#9aa0a6', // matches SEGMENT_COLOR.unchanged
 };
+
+// Shared stop-legend rows so every diff view (network overview, focused route,
+// split) renders the same set in the same order. `unchanged` sits last because
+// it defaults off in the store — otherwise it blankets the map.
+export const STOP_LEGEND: Array<{ id: StopStatus; label: string }> = [
+  { id: 'added', label: 'Added stop' },
+  { id: 'removed', label: 'Removed stop' },
+  { id: 'moved', label: 'Moved stop' },
+  { id: 'renamed', label: 'Renamed stop' },
+  { id: 'unchanged', label: 'Unchanged stop' },
+];
 
 function mainPosition(e: StopDiffEntry): [number, number] | null {
   switch (e.status) {
@@ -48,6 +59,38 @@ export function diffStopPoints(
     features.push({
       type: 'Feature',
       geometry: { type: 'Point', coordinates: coord },
+      properties: {
+        canonicalId: e.canonicalId,
+        status: e.status,
+        a_name: e.a?.name ?? null,
+        b_name: e.b?.name ?? null,
+        dist_m: Math.round(e.distM),
+      },
+    });
+  }
+  return { type: 'FeatureCollection', features };
+}
+
+/**
+ * One feed's own stops, each at *that feed's* position — for the split view,
+ * where the left pane draws feed A and the right pane draws feed B. A stop is
+ * emitted only if it exists in the requested feed, so `added` appears on B
+ * only, `removed` on A only, and a `moved` stop shows displaced between the
+ * two panes (the split itself is the before/after — no ghost/arrow needed).
+ */
+export function diffStopPointsForFeed(
+  result: DiffResult,
+  visibility: Record<StopStatus, boolean>,
+  feed: 'a' | 'b',
+): GeoJSON.FeatureCollection {
+  const features: GeoJSON.Feature[] = [];
+  for (const e of result.stops) {
+    if (!visibility[e.status]) continue;
+    const stop = feed === 'a' ? e.a : e.b;
+    if (!stop) continue;
+    features.push({
+      type: 'Feature',
+      geometry: { type: 'Point', coordinates: [stop.lon, stop.lat] },
       properties: {
         canonicalId: e.canonicalId,
         status: e.status,

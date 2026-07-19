@@ -8,7 +8,7 @@
 // pass on the main thread.
 
 import { type Mode, MODES } from './modes';
-import { fetchShapes, fetchShapeRouteMap } from './queries';
+import { fetchShapes, fetchShapeRouteMap, fetchShapeDirectionMap } from './queries';
 import {
   buildShapeIndex,
   diffShapes,
@@ -42,9 +42,10 @@ export function buildRoutePairs(result: DiffResult): RoutePair[] {
 
 /** Palette shared by the diff map layers and the sidebar swatches. */
 export const SEGMENT_COLOR: Record<GeomStatus, string> = {
-  added: '#16a34a',    // green-600
-  removed: '#dc2626',  // red-600
-  unchanged: '#475569', // slate-600
+  added: '#2ecc71',
+  removed: '#e74c3c',
+  unchanged: '#9aa0a6',
+  changed: '#f1c40f',
 };
 
 // ---- Per-feed shape cache ------------------------------------------
@@ -54,6 +55,9 @@ export interface FeedShapes {
   shapes: readonly ShapePolyline[];
   /** shape_id -> route_id[] membership (many-to-many; see `fetchShapeRouteMap`). */
   shapeRouteMap: Map<string, string[]>;
+  /** shape_id -> dominant direction_id, `-1` when the feed has none. Scopes
+   *  the diff to one direction at a time; see `diffShapesByRoute`. */
+  shapeDirectionMap: Map<string, number>;
 }
 
 const indexCache = new Map<string, Promise<FeedShapes>>();
@@ -67,11 +71,12 @@ export function getShapeIndex(feedId: string): Promise<FeedShapes> {
   const hit = indexCache.get(feedId);
   if (hit) return hit;
   const p = (async () => {
-    const [shapes, shapeRouteMap] = await Promise.all([
+    const [shapes, shapeRouteMap, shapeDirectionMap] = await Promise.all([
       fetchShapes(feedId),
       fetchShapeRouteMap(feedId),
+      fetchShapeDirectionMap(feedId),
     ]);
-    return { feedId, shapes, shapeRouteMap } as FeedShapes;
+    return { feedId, shapes, shapeRouteMap, shapeDirectionMap } as FeedShapes;
   })().catch((err) => {
     indexCache.delete(feedId);
     throw err;
@@ -162,6 +167,8 @@ export function getDiffedShapes(
       shapesB: idxB.shapes,
       shapeRouteMapA: [...idxA.shapeRouteMap],
       shapeRouteMapB: [...idxB.shapeRouteMap],
+      shapeDirMapA: [...idxA.shapeDirectionMap],
+      shapeDirMapB: [...idxB.shapeDirectionMap],
       pairs,
     });
   }).catch((err) => {
@@ -197,6 +204,7 @@ export interface SegmentLengths {
   added: number;
   removed: number;
   unchanged: number;
+  changed: number;
 }
 
 /**
@@ -214,6 +222,47 @@ export interface SegmentDiff {
   features: GeoJSON.FeatureCollection;
   lengths: SegmentLengths;
   routeLengths: RouteLineLengths;
+}
+
+/**
+ * `accept` predicate keeping exactly one copy of each shared corridor.
+ *
+ * `unchanged` runs are emitted from both feeds for the same physical
+ * stretch (see `classifyAndEmit`), so a view that draws both gets two
+ * near-identical overlapping lines. Views that show a single combined
+ * picture (network, split panes) want the A-side copy; a view showing the
+ * *new* network wants the B-side one. The layers themselves no longer
+ * filter by feed — drawing the wrong side used to blank the unchanged
+ * geometry entirely, leaving a route as disconnected fragments.
+ */
+export function preferFeed(side: 'a' | 'b'): (r: DiffedRun) => boolean {
+  return (r) => (r.status === 'unchanged' ? r.feed === side : true);
+}
+
+/**
+ * Network-scale `accept` predicate: `preferFeed('a')`, except on routes that
+ * were rerouted, where *both* unchanged copies are kept.
+ *
+ * Each feed's runs are splits of that feed's own polyline, so a B-side
+ * `changed` run's continuation is the B-side unchanged copy. Dropping it (as
+ * plain `preferFeed('a')` does) leaves the yellow reroute ending in mid-air,
+ * up to TOL_M from the surviving A-side copy — the same discontinuity
+ * `RouteDetailView` avoids by accepting both feeds in colored mode. Scoping
+ * the overdraw to rerouted routes buys that continuity without doubling the
+ * grey network everywhere.
+ */
+export function preferFeedKeepingReroutes(
+  diff: DiffedShapes,
+  side: 'a' | 'b' = 'a',
+): (r: DiffedRun) => boolean {
+  const rerouted = new Set<string>();
+  for (const run of diff.runs) {
+    if (run.status === 'changed') rerouted.add(run.canonicalId);
+  }
+  return (r) => {
+    if (r.status !== 'unchanged') return true;
+    return r.feed === side || rerouted.has(r.canonicalId);
+  };
 }
 
 /** 'removed' | 'added' route-identity status for the route owning a run, or
@@ -268,7 +317,7 @@ export function segmentDiffToGeoJSON(
   lineStatus: (r: DiffedRun) => RunLineStatus = () => null,
 ): SegmentDiff {
   const features: GeoJSON.Feature[] = [];
-  const lengths: SegmentLengths = { added: 0, removed: 0, unchanged: 0 };
+  const lengths: SegmentLengths = { added: 0, removed: 0, unchanged: 0, changed: 0 };
   const routeLengths: RouteLineLengths = { added: 0, removed: 0 };
   const seenLength = new Set<string>();
   for (const run of diff.runs) {
@@ -279,8 +328,15 @@ export function segmentDiffToGeoJSON(
     // `unchanged` runs are emitted from both feeds for the same physical
     // corridor (see classifyAndEmit) so route identity can be
     // cross-referenced on the B side too; only count the A-side copy here
-    // to avoid doubling the "shared geometry" length total.
-    if (!isDupe && (run.status !== 'unchanged' || run.feed === 'a')) {
+    // to avoid doubling the "shared geometry" length total. `changed`
+    // runs are similarly emitted as an old/new pair for one reroute —
+    // only the new-side length counts, so a rerouted stretch reads as
+    // "X km changed" rather than the old+new sum inflating the figure.
+    const countsTowardLength =
+      run.status === 'unchanged' ? run.feed === 'a'
+      : run.status === 'changed' ? run.changedSide === 'new'
+      : true;
+    if (!isDupe && countsTowardLength) {
       lengths[run.status] += lineLengthM(run.coords);
     }
     const ls = lineStatus(run);
@@ -292,9 +348,14 @@ export function segmentDiffToGeoJSON(
       geometry: { type: 'LineString', coordinates: run.coords },
       properties: {
         geom_status: run.status,
+        changed_side: run.changedSide ?? null,
         line_status: ls ?? 'none',
         shape_id: run.shape_id,
         route_id: run.route_id,
+        // The canonical route this run was diffed under (route-scoped diff)
+        // — authoritative for click-to-focus, since a shape shared by
+        // several routes is ambiguous to resolve after the fact.
+        canonical_id: run.canonicalId,
         feed: run.feed,
         primary_mode: run.primary_mode,
         ...modeFlags(run.modes),

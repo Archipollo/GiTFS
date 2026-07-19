@@ -449,6 +449,51 @@ export async function fetchRouteDirections(
 }
 
 /**
+ * Whole-feed shape → dominant `direction_id` index, used by the geometry
+ * diff to compare a route's outbound shapes only against the other feed's
+ * outbound shapes (and inbound against inbound) instead of pooling both
+ * directions into one buffer union — which let an outbound shape classify
+ * against the opposite direction's corridor.
+ *
+ * A shape is keyed by the `direction_id` of the majority of its trips
+ * (shapes are direction-specific in practice; the COUNT ordering just
+ * resolves the rare mixed shape deterministically). Feeds without a
+ * `direction_id` column, and trips with a null value, collapse to the `-1`
+ * sentinel used elsewhere in this file for "no direction" — callers treat
+ * an all-`-1` feed as unsplittable and fall back to the union diff.
+ */
+export async function fetchShapeDirectionMap(
+  feedId: string,
+): Promise<Map<string, number>> {
+  await ensureFeedTablesLoaded(feedId);
+  const conn = await getConnection();
+  try {
+    if (!(await tableExists(conn, feedId, 'trips'))) return new Map();
+    const hasShapeCol = await columnExists(conn, feedId, 'trips', 'shape_id');
+    if (!hasShapeCol) return new Map();
+    const hasDir = await columnExists(conn, feedId, 'trips', 'direction_id');
+    const dirExpr = hasDir ? 'COALESCE(TRY_CAST(direction_id AS INTEGER), -1)' : '-1';
+    const tr = qualifiedTable(feedId, 'trips.txt');
+    const res = await conn.query(`
+      SELECT shape_id, ${dirExpr} AS dir, COUNT(*)::INTEGER AS n
+      FROM ${tr}
+      WHERE shape_id IS NOT NULL
+      GROUP BY shape_id, dir
+      ORDER BY shape_id, n DESC
+    `);
+    const out = new Map<string, number>();
+    for (const row of res.toArray()) {
+      const shapeId = row.shape_id == null ? '' : String(row.shape_id);
+      if (!shapeId || out.has(shapeId)) continue; // first row per shape = most trips
+      out.set(shapeId, Number(row.dir));
+    }
+    return out;
+  } finally {
+    await conn.close();
+  }
+}
+
+/**
  * Whole-feed shape → route_id[] index. One query, one pass; used by the diff
  * overlay to color every polyline by its route's diff status.
  *

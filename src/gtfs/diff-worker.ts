@@ -3,8 +3,9 @@
 //
 // Receives serialised ShapePolyline arrays for two feeds, plus the
 // route-identity correspondence (`RoutePair[]`, already computed by the
-// registry-driven entity diff) and each feed's shape->route_id[]
-// membership. Builds route-scoped segment indexes, runs the arc-length
+// registry-driven entity diff), each feed's shape->route_id[] membership,
+// and each feed's shape->direction_id map (which scopes the comparison to
+// one direction at a time). Builds route-scoped segment indexes, runs the arc-length
 // walk + binary-search crossing classification per matched route pair,
 // and posts back the classified DiffedRun array. No DuckDB or browser DOM
 // APIs are used.
@@ -23,6 +24,8 @@ interface DiffRequest {
   // worker boundary — sent as entries arrays, reconstructed on receipt.
   shapeRouteMapA: [string, string[]][];
   shapeRouteMapB: [string, string[]][];
+  shapeDirMapA: [string, number][];
+  shapeDirMapB: [string, number][];
   pairs: RoutePair[];
 }
 
@@ -42,13 +45,18 @@ interface WorkerScope {
 const ctx = self as unknown as WorkerScope;
 
 ctx.onmessage = (e: MessageEvent<DiffRequest>) => {
-  const { id, feedA, feedB, shapesA, shapesB, shapeRouteMapA, shapeRouteMapB, pairs } = e.data;
+  const {
+    id, feedA, feedB, shapesA, shapesB,
+    shapeRouteMapA, shapeRouteMapB, shapeDirMapA, shapeDirMapB, pairs,
+  } = e.data;
   const t0 = performance.now();
   const result = diffShapesByRoute(
     feedA, feedB,
     shapesA, shapesB,
     new Map(shapeRouteMapA), new Map(shapeRouteMapB),
     pairs,
+    undefined,
+    new Map(shapeDirMapA), new Map(shapeDirMapB),
   );
   const tDone = performance.now();
   console.info('[diff-worker]', {

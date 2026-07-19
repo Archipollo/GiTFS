@@ -10,7 +10,8 @@ import { yearOfFeed, feedYearsOf, feedYearLabels, pickFeedForYear, type FeedYear
  * removed segment already existed in a different satellite vintage.
  */
 export function DiffTimelineStrip() {
-  const mode = useAppStore((s) => s.mode);
+  const diffOverviewLayout = useAppStore((s) => s.diffOverviewLayout);
+  const diffViewMode = useAppStore((s) => s.diffViewMode);
   const feedOrder = useAppStore((s) => s.feedOrder);
   const feeds = useAppStore((s) => s.feeds);
   const activeFeedId = useAppStore((s) => s.activeFeedId);
@@ -24,7 +25,11 @@ export function DiffTimelineStrip() {
     [feedOrder, feeds],
   );
 
-  if (mode !== 'diff') return null;
+  // Only the single-map network overview has one satellite layer to scrub.
+  // Timeline drives its own year; the split panes are each pinned to the era
+  // of the feed they draw, so a shared scrubber would be meaningless there.
+  if (diffOverviewLayout !== 'single') return null;
+  if (diffViewMode !== 'overview') return null;
   if (!historicalBasemap) return null;
   if (feedYears.length < 2) return null;
 

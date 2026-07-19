@@ -12,7 +12,7 @@ import { feedYearsOf, feedYearLabels, type FeedYear } from './math';
  * shows both, keyed by feed id rather than year.
  */
 export default function TimelineStrip() {
-  const mode = useAppStore((s) => s.mode);
+  const diffOverviewLayout = useAppStore((s) => s.diffOverviewLayout);
   const feedOrder = useAppStore((s) => s.feedOrder);
   const feeds = useAppStore((s) => s.feeds);
   const activeFeedId = useAppStore((s) => s.activeFeedId);
@@ -35,16 +35,16 @@ export default function TimelineStrip() {
     }
   }, [feedYears, timelineFeedId, setTimelineFeedId]);
 
-  // Selected feed drives the active feed while in timeline mode.
+  // Selected feed drives the active feed while the timeline layout is shown.
   useEffect(() => {
-    if (mode !== 'timeline') return;
+    if (diffOverviewLayout !== 'timeline') return;
     if (timelineFeedId == null) return;
     if (timelineFeedId !== activeFeedId && feeds[timelineFeedId]) {
       useAppStore.setState({ activeFeedId: timelineFeedId });
     }
-  }, [mode, timelineFeedId, feeds, activeFeedId]);
+  }, [diffOverviewLayout, timelineFeedId, feeds, activeFeedId]);
 
-  if (mode !== 'timeline') return null;
+  if (diffOverviewLayout !== 'timeline') return null;
   if (feedYears.length < 2) return null;
 
   const labels = feedYearLabels(feedYears);

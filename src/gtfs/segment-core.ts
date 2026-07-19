@@ -104,6 +104,30 @@ const FALLBACK_M = 5;
 const FALLBACK_SQ = FALLBACK_M * FALLBACK_M;
 
 /**
+ * Corridor width (metres) used to pair up `removed`/`added` runs on the
+ * same route as a single reroute ("changed") rather than an independent
+ * deletion + addition. Deliberately much wider than TOL_M (25 m) — by
+ * definition these runs already failed that tighter test — but still
+ * bounded so a removal at one end of a long route is never paired with
+ * an unrelated addition elsewhere on the same line. 150 m is a heuristic
+ * starting point (~6x TOL_M: enough to bridge a reroute onto a parallel
+ * street a block over, tight enough not to span unrelated changes) and
+ * may need visual tuning against real-world feeds.
+ */
+export const CHANGED_TOL_M = 150;
+const CHANGED_TOL_SQ = CHANGED_TOL_M * CHANGED_TOL_M;
+const CHANGED_GRID_M = CHANGED_TOL_M * 2;
+
+/**
+ * Minimum fraction of a run's arc-length samples that must fall within
+ * CHANGED_TOL_M of the other side for the pair to be classified as a
+ * reroute. Whole-run, not sub-splitting: a run that's mostly near the
+ * corridor but partly orphaned is still treated as one reroute rather
+ * than being cut into changed/removed pieces (future refinement).
+ */
+export const CHANGED_COVERAGE_MIN = 0.6;
+
+/**
  * Arc-length window (metres, each side) used to smooth the tangent at a
  * vertex, instead of deriving it from a single raw two-vertex GTFS
  * segment. Complementary to FALLBACK_M: it reduces tangent noise in the
@@ -113,6 +137,69 @@ const FALLBACK_SQ = FALLBACK_M * FALLBACK_M;
  * for the distance fallback, which is what actually bounds correctness.
  */
 const TANGENT_WINDOW_M = STEP_M;
+
+/**
+ * Minimum run length (metres) below which a classified stretch is treated as
+ * noise and merged into its longer neighbour rather than kept as its own
+ * run. Complements the direction gate / mutual-pairing logic rather than
+ * replacing it: those decide *whether* a sample or run is a genuine match,
+ * this only cleans up short spurious flips (e.g. a brief fallback-distance
+ * stub at a junction) so a route's runs read as a few coherent stretches
+ * instead of confetti. 40 m mirrors the equivalent constant in the
+ * standalone prototype this technique was ported from and, like
+ * CHANGED_TOL_M, is a heuristic starting point that may need visual tuning.
+ */
+export const MIN_RUN_M = 40;
+
+/**
+ * Iteratively merges the shortest run in `runs` into whichever neighbour is
+ * longer, until every run clears `minRunM` (or only one run remains).
+ * Operates on a single shape's own runs only (all sharing shape_id/feed/
+ * route_id/canonicalId) — callers must not mix runs from different shapes.
+ * A final pass collapses any adjacent same-status runs a merge produces
+ * (e.g. unchanged-removed-unchanged with the middle run merged into either
+ * side yields two adjacent unchanged runs) so the result stays a sequence
+ * of maximal same-status runs, matching classifyAndEmit's own invariant.
+ */
+function smoothRuns<T extends { status: GeomStatus; coords: [number, number][] }>(
+  runs: readonly T[],
+  minRunM: number,
+): T[] {
+  const list: T[] = runs.slice();
+  while (list.length > 1) {
+    let shortestIdx = 0;
+    let shortestLen = Infinity;
+    for (let i = 0; i < list.length; i++) {
+      const len = lineLengthM(list[i].coords);
+      if (len < shortestLen) { shortestLen = len; shortestIdx = i; }
+    }
+    if (shortestLen >= minRunM) break;
+    const leftLen = shortestIdx > 0 ? lineLengthM(list[shortestIdx - 1].coords) : -1;
+    const rightLen = shortestIdx < list.length - 1 ? lineLengthM(list[shortestIdx + 1].coords) : -1;
+    const mergeRight = rightLen > leftLen;
+    const targetIdx = mergeRight ? shortestIdx + 1 : shortestIdx - 1;
+    const target = list[targetIdx];
+    const short = list[shortestIdx];
+    const mergedCoords: [number, number][] = mergeRight
+      ? [...short.coords.slice(0, -1), ...target.coords]
+      : [...target.coords.slice(0, -1), ...short.coords];
+    const merged: T = { ...target, coords: mergedCoords };
+    const lo = Math.min(shortestIdx, targetIdx);
+    list.splice(lo, 2, merged);
+  }
+
+  const collapsed: T[] = [];
+  for (const run of list) {
+    const last = collapsed[collapsed.length - 1];
+    if (last && last.status === run.status) {
+      const mergedCoords: [number, number][] = [...last.coords.slice(0, -1), ...run.coords];
+      collapsed[collapsed.length - 1] = { ...last, coords: mergedCoords };
+    } else {
+      collapsed.push(run);
+    }
+  }
+  return collapsed;
+}
 
 // ---- Local equirectangular projection (metres around Austria) -------
 
@@ -331,7 +418,7 @@ class SegmentIndex {
 
 // ---- Public types ---------------------------------------------------
 
-export type GeomStatus = 'unchanged' | 'added' | 'removed';
+export type GeomStatus = 'unchanged' | 'added' | 'removed' | 'changed';
 
 export interface DiffedRun {
   status: GeomStatus;
@@ -343,6 +430,12 @@ export interface DiffedRun {
   primary_mode: Mode;
   /** Canonical route id this run was scoped to (see `diffShapesByRoute`). */
   canonicalId: string;
+  /**
+   * Set only when status === 'changed': which side of a paired reroute
+   * this run is — the old (feed A) alignment or the new (feed B) one.
+   * See `reclassifyReroutes`.
+   */
+  changedSide?: 'old' | 'new';
 }
 
 export interface DiffedShapes {
@@ -377,25 +470,33 @@ export function buildShapeIndex(
   return { feedId, shapes, segmentCount: index.size, index };
 }
 
-export function diffShapes(a: ShapeIndex, b: ShapeIndex): DiffedShapes {
+export function diffShapes(
+  a: ShapeIndex,
+  b: ShapeIndex,
+  smoothMinRunM: number = MIN_RUN_M,
+): DiffedShapes {
   const runs: DiffedRun[] = [];
   for (const sh of a.shapes) {
+    const shapeRuns: DiffedRun[] = [];
     classifyAndEmit(sh, b.index, 'a', (status, coords) => {
-      runs.push({
+      shapeRuns.push({
         status, coords,
         shape_id: sh.shape_id, route_id: sh.route_id, feed: 'a',
         modes: sh.modes, primary_mode: sh.primary_mode, canonicalId: '',
       });
     });
+    for (const run of smoothRuns(shapeRuns, smoothMinRunM)) runs.push(run);
   }
   for (const sh of b.shapes) {
+    const shapeRuns: DiffedRun[] = [];
     classifyAndEmit(sh, a.index, 'b', (status, coords) => {
-      runs.push({
+      shapeRuns.push({
         status, coords,
         shape_id: sh.shape_id, route_id: sh.route_id, feed: 'b',
         modes: sh.modes, primary_mode: sh.primary_mode, canonicalId: '',
       });
     });
+    for (const run of smoothRuns(shapeRuns, smoothMinRunM)) runs.push(run);
   }
   return { feedA: a.feedId, feedB: b.feedId, runs };
 }
@@ -463,6 +564,51 @@ function gatherShapes(
 }
 
 /**
+ * Partition one side's shapes by their dominant `direction_id`, so a
+ * route's outbound geometry is only ever compared against the other feed's
+ * outbound geometry. Shapes with no direction (feed lacks the column, or
+ * null trips) land in the `-1` bucket — the same sentinel `queries.ts` and
+ * the inspector's direction pairing use.
+ */
+function shapesByDirection(
+  shapes: readonly ShapePolyline[],
+  dirMap: ReadonlyMap<string, number>,
+): Map<number, ShapePolyline[]> {
+  const out = new Map<number, ShapePolyline[]>();
+  for (const sh of shapes) {
+    const dir = dirMap.get(sh.shape_id) ?? -1;
+    let arr = out.get(dir);
+    if (!arr) { arr = []; out.set(dir, arr); }
+    arr.push(sh);
+  }
+  return out;
+}
+
+/**
+ * Decide whether one route pair's shapes can be safely diffed per
+ * direction. Splitting is only sound when both feeds model this route's
+ * directions at the *same granularity*: same direction-key set, at least
+ * two of them, and no unusable `-1` bucket. Otherwise a bucket present on
+ * only one side would be diffed against nothing and emitted wholesale as
+ * added/removed — a false positive the whole-route union never produces.
+ *
+ * Returns the shared direction keys, or null to fall back to the union diff.
+ */
+function splittableDirections(
+  aByDir: ReadonlyMap<number, ShapePolyline[]>,
+  bByDir: ReadonlyMap<number, ShapePolyline[]>,
+): number[] | null {
+  if (aByDir.size < 2 || aByDir.size !== bByDir.size) return null;
+  if (aByDir.has(-1) || bByDir.has(-1)) return null;
+  const keys: number[] = [];
+  for (const k of aByDir.keys()) {
+    if (!bByDir.has(k)) return null;
+    keys.push(k);
+  }
+  return keys.sort((x, y) => x - y);
+}
+
+/**
  * Buffer-overlay diff scoped per matched route pair instead of feed-wide.
  * For each pair with shapes on both sides, runs the existing
  * `buildShapeIndex`/`diffShapes` on just that route's own shapes. For a
@@ -475,6 +621,15 @@ function gatherShapes(
  * pairs and so may be emitted twice (harmless on the map — same
  * geometry — but callers summing lengths must dedupe by shape_id; see
  * `segmentDiffToGeoJSON`).
+ *
+ * Within a matched pair the shapes are further split by `direction_id`
+ * (see `splittableDirections`) so an outbound shape is never classified
+ * against the opposite direction's corridor — the two directions of a line
+ * routinely differ (one-way streets, terminal loops), which used to make a
+ * direction's genuine reroute read as unchanged, or pair an old-outbound
+ * run with a new-inbound one. When the two feeds don't agree on the
+ * route's direction structure, the pair falls back to the whole-route
+ * union diff rather than inventing added/removed geometry.
  */
 export function diffShapesByRoute(
   feedA: string,
@@ -484,20 +639,45 @@ export function diffShapesByRoute(
   shapeRouteMapA: ReadonlyMap<string, string[]>,
   shapeRouteMapB: ReadonlyMap<string, string[]>,
   pairs: readonly RoutePair[],
+  smoothMinRunM: number = MIN_RUN_M,
+  shapeDirMapA: ReadonlyMap<string, number> = new Map(),
+  shapeDirMapB: ReadonlyMap<string, number> = new Map(),
 ): DiffedShapes {
   const byRouteA = shapesByRoute(shapesA, shapeRouteMapA);
   const byRouteB = shapesByRoute(shapesB, shapeRouteMapB);
   const runs: DiffedRun[] = [];
+
+  // One matched (sub)set of shapes vs its counterpart. Reroute
+  // reclassification runs per call, so it can only ever pair an old run
+  // with a new run from the *same* direction bucket.
+  const diffBucket = (
+    canonicalId: string,
+    aShapes: readonly ShapePolyline[],
+    bShapes: readonly ShapePolyline[],
+  ): void => {
+    const idxA = buildShapeIndex(feedA, aShapes);
+    const idxB = buildShapeIndex(feedB, bShapes);
+    const diffed = diffShapes(idxA, idxB, smoothMinRunM);
+    const bucketRuns = diffed.runs.map((run) => ({ ...run, canonicalId }));
+    reclassifyReroutes(bucketRuns);
+    for (const run of bucketRuns) runs.push(run);
+  };
 
   for (const pair of pairs) {
     const aShapes = gatherShapes(byRouteA, pair.aRawIds);
     const bShapes = gatherShapes(byRouteB, pair.bRawIds);
 
     if (aShapes.length && bShapes.length) {
-      const idxA = buildShapeIndex(feedA, aShapes);
-      const idxB = buildShapeIndex(feedB, bShapes);
-      const diffed = diffShapes(idxA, idxB);
-      for (const run of diffed.runs) runs.push({ ...run, canonicalId: pair.canonicalId });
+      const aByDir = shapesByDirection(aShapes, shapeDirMapA);
+      const bByDir = shapesByDirection(bShapes, shapeDirMapB);
+      const dirs = splittableDirections(aByDir, bByDir);
+      if (dirs) {
+        for (const dir of dirs) {
+          diffBucket(pair.canonicalId, aByDir.get(dir)!, bByDir.get(dir)!);
+        }
+      } else {
+        diffBucket(pair.canonicalId, aShapes, bShapes);
+      }
     } else if (aShapes.length) {
       for (const sh of aShapes) {
         runs.push({
@@ -518,6 +698,125 @@ export function diffShapesByRoute(
   }
 
   return { feedA, feedB, runs };
+}
+
+/**
+ * Post-process one route pair's `removed`/`added` runs (mutated in place)
+ * to detect reroutes: a `removed` run and an `added` run that trace the
+ * same physical corridor at a wider tolerance than the primary buffer-
+ * overlay test (which, by construction, already failed to match them at
+ * TOL_M). Matched runs are reclassified to `status: 'changed'` with
+ * `changedSide: 'old'`/`'new'` instead of staying `removed`/`added`, so
+ * the map can render them as a paired yellow dotted/solid line instead
+ * of an unrelated-looking red/green pair.
+ *
+ * Mutual pairing: a run is only promoted if (a) it clears
+ * CHANGED_COVERAGE_MIN against the *union* of the opposite side (so one
+ * reroute split into several runs on either side is still recognised),
+ * AND (b) it is spatially linked — some sample falls within
+ * CHANGED_TOL_M — to at least one run on the opposite side that *also*
+ * independently clears its own union-coverage test. Requiring both sides
+ * of a pairing to agree prevents the asymmetric case where a long
+ * `removed` run fails its own coverage test (partly orphaned) while a
+ * short, spatially-linked `added` run passes against the union index —
+ * which used to promote the added run alone, leaving an unpaired yellow
+ * stub next to an unpaired red stub instead of one coherent reroute.
+ */
+function reclassifyReroutes(runs: DiffedRun[]): void {
+  const removedRuns = runs.filter((r) => r.status === 'removed');
+  const addedRuns = runs.filter((r) => r.status === 'added');
+  if (!removedRuns.length || !addedRuns.length) return;
+
+  const buildIndex = (side: readonly DiffedRun[]): SegmentIndex => {
+    const idx = new SegmentIndex(CHANGED_GRID_M);
+    for (const run of side) {
+      const coords = run.coords;
+      for (let i = 1; i < coords.length; i++) {
+        const [alon, alat] = coords[i - 1];
+        const [blon, blat] = coords[i];
+        idx.add(lonToX(alon), latToY(alat), lonToX(blon), latToY(blat), 0, 0);
+      }
+    }
+    return idx;
+  };
+
+  const addedIdx = buildIndex(addedRuns);
+  const removedIdx = buildIndex(removedRuns);
+
+  // Direction-agnostic proximity test: passing fallbackSq === maxDist^2
+  // makes the cheap distance check alone decide every candidate, so the
+  // tangent/cosMin gate (irrelevant here — reroutes can locally reverse
+  // direction relative to the old alignment) never actually applies.
+  const forEachSample = (run: DiffedRun, cb: (lon: number, lat: number) => void): void => {
+    const coords = run.coords;
+    for (let i = 0; i < coords.length; i++) {
+      cb(coords[i][0], coords[i][1]);
+      if (i === coords.length - 1) continue;
+      const segLen = haversineM(coords[i][0], coords[i][1], coords[i + 1][0], coords[i + 1][1]);
+      if (segLen > STEP_M) {
+        const numSteps = Math.ceil(segLen / STEP_M);
+        for (let s = 1; s < numSteps; s++) {
+          const t = s / numSteps;
+          cb(
+            coords[i][0] + t * (coords[i + 1][0] - coords[i][0]),
+            coords[i][1] + t * (coords[i + 1][1] - coords[i][1]),
+          );
+        }
+      }
+    }
+  };
+
+  const coversCorridor = (run: DiffedRun, idx: SegmentIndex): boolean => {
+    let samples = 0;
+    let matched = 0;
+    forEachSample(run, (lon, lat) => {
+      samples++;
+      if (idx.hasWithin(lonToX(lon), latToY(lat), CHANGED_TOL_M, 0, 0, 1, CHANGED_TOL_SQ)) matched++;
+    });
+    if (samples === 0) return false;
+    return matched / samples >= CHANGED_COVERAGE_MIN;
+  };
+
+  // Whether `run` has any sample within CHANGED_TOL_M of `other`'s own
+  // geometry specifically — used to find candidate partners once we
+  // already know which runs pass the union-coverage test, so this only
+  // has to run per (candidate, partner) pair rather than against a
+  // shared index.
+  const isNear = (run: DiffedRun, other: DiffedRun): boolean => {
+    const otherIdx = new SegmentIndex(CHANGED_GRID_M);
+    const coords = other.coords;
+    for (let i = 1; i < coords.length; i++) {
+      const [alon, alat] = coords[i - 1];
+      const [blon, blat] = coords[i];
+      otherIdx.add(lonToX(alon), latToY(alat), lonToX(blon), latToY(blat), 0, 0);
+    }
+    let found = false;
+    forEachSample(run, (lon, lat) => {
+      if (found) return;
+      if (otherIdx.hasWithin(lonToX(lon), latToY(lat), CHANGED_TOL_M, 0, 0, 1, CHANGED_TOL_SQ)) found = true;
+    });
+    return found;
+  };
+
+  const removedCovers = removedRuns.map((run) => coversCorridor(run, addedIdx));
+  const addedCovers = addedRuns.map((run) => coversCorridor(run, removedIdx));
+
+  removedRuns.forEach((run, i) => {
+    if (!removedCovers[i]) return;
+    const hasPassingPartner = addedRuns.some((added, j) => addedCovers[j] && isNear(run, added));
+    if (hasPassingPartner) {
+      run.status = 'changed';
+      run.changedSide = 'old';
+    }
+  });
+  addedRuns.forEach((run, j) => {
+    if (!addedCovers[j]) return;
+    const hasPassingPartner = removedRuns.some((removed, i) => removedCovers[i] && isNear(run, removed));
+    if (hasPassingPartner) {
+      run.status = 'changed';
+      run.changedSide = 'new';
+    }
+  });
 }
 
 /**
