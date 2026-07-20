@@ -23,6 +23,7 @@ import { useRegistry } from '../registry/useRegistry';
 import { lookupStop, lookupRoute } from '../registry/registry';
 import { dropDiffCache, dropShapeIndex } from '../gtfs/segment-graph';
 import { getRoutesForShape, getRouteDirections } from '../inspector/data';
+import { usePersistedCamera } from './usePersistedCamera';
 
 const INITIAL_CENTER: [number, number] = [14.55, 47.6];
 const INITIAL_ZOOM = 6.5;
@@ -83,8 +84,12 @@ export default function MapView() {
   // In-flight fetch promises to dedupe concurrent requests for the same feed.
   const pendingRef = useRef<Map<string, Promise<FeedRender>>>(new Map());
   // Auto-fit the map once; subsequent feed switches must not jump the camera
-  // (scrubbing relies on a stable viewport to show differences).
-  const fittedRef = useRef(false);
+  // (scrubbing relies on a stable viewport to show differences). A camera
+  // restored from another overview layout counts as already-fitted, so
+  // switching into timeline keeps the current view.
+  const fittedRef = useRef(!!useAppStore.getState().mapCamera);
+
+  const initialCamera = usePersistedCamera(mapRef, ready);
 
   const ensureFeedRender = useCallback(async (feedId: string): Promise<FeedRender> => {
     const cached = cacheRef.current.get(feedId);
@@ -117,8 +122,10 @@ export default function MapView() {
     const map = new maplibregl.Map({
       container: containerRef.current,
       style: makeStyle(),
-      center: INITIAL_CENTER,
-      zoom: INITIAL_ZOOM,
+      center: initialCamera?.center ?? INITIAL_CENTER,
+      zoom: initialCamera?.zoom ?? INITIAL_ZOOM,
+      bearing: initialCamera?.bearing ?? 0,
+      pitch: initialCamera?.pitch ?? 0,
     });
     map.addControl(new maplibregl.NavigationControl(), 'top-right');
     map.on('load', () => {
@@ -312,7 +319,7 @@ export default function MapView() {
       map.remove();
       mapRef.current = null;
     };
-  }, [setInspectorStop, setInspectorRoute, clearInspector]);
+  }, [setInspectorStop, setInspectorRoute, clearInspector, initialCamera]);
 
   // Swap visible feed. Cache hit = instant setData, no spinner, no camera move.
   useEffect(() => {

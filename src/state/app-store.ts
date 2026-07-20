@@ -69,6 +69,17 @@ export interface PinnedEntity {
 
 export type MapStyle = 'standard' | 'voyager' | 'dark' | 'positron';
 
+/** Persisted map camera, shared across the overview maps (network / split /
+ *  timeline) so switching layouts keeps the user's current view instead of
+ *  resetting to the all-Austria default. In-memory only — a page reload starts
+ *  fresh and lets the first auto-fit run. */
+export interface MapCamera {
+  center: [number, number];
+  zoom: number;
+  bearing: number;
+  pitch: number;
+}
+
 export interface AppState {
   /** Re-runs the oldest/newest-feed diff-pair auto-pick, run once at boot and
    *  whenever the loaded feed set changes. */
@@ -260,6 +271,15 @@ export interface AppState {
    */
   diffRoutesWithGeomChange: Set<string> | null;
   setDiffRoutesWithGeomChange: (s: Set<string> | null) => void;
+  /**
+   * Canonical route id → the `direction_id`s whose geometry can actually be
+   * isolated on the map (i.e. the route pair was splittable by direction, so
+   * its runs carry a real direction_id — see `diffShapesByRoute`). Empty/absent
+   * means the line can only be shown as "Entire line". Drives which direction
+   * sub-rows the line-list offers and the detail view's direction filter.
+   */
+  diffRouteDirections: Map<string, number[]> | null;
+  setDiffRouteDirections: (m: Map<string, number[]> | null) => void;
   setDiffStopFocus: (canonicalId: string | null) => void;
   /** `candidates` defaults to `[canonicalId]` when omitted or null is passed. */
   setDiffRouteFocus: (
@@ -294,11 +314,26 @@ export interface AppState {
   diffOverviewLayout: 'single' | 'split' | 'timeline';
   setDiffOverviewLayout: (l: 'single' | 'split' | 'timeline') => void;
   /**
+   * Last camera the overview maps (network / split / timeline) were left at.
+   * Written on `moveend`, read once when a map is (re)constructed so switching
+   * layouts preserves the current view. Null until the first pan/zoom.
+   */
+  mapCamera: MapCamera | null;
+  setMapCamera: (c: MapCamera) => void;
+  /**
    * Detail-view mode switch: show both feeds' geometry colored by diff
    * status, or isolate just the old (feed A) or new (feed B) alignment.
    */
   diffDetailMode: 'colored' | 'old' | 'new';
   setDiffDetailMode: (m: 'colored' | 'old' | 'new') => void;
+  /**
+   * Detail-view direction filter: `null` = "Entire line" (union of both
+   * directions, the default), or a specific `direction_id` to isolate one
+   * direction's geometry. Reset to `null` whenever the focused route changes
+   * so switching lines never carries a stale direction over.
+   */
+  diffDirectionFocus: number | null;
+  setDiffDirectionFocus: (dir: number | null) => void;
 
   /**
    * Year to use for the Wayback satellite basemap in diff mode.
@@ -514,12 +549,17 @@ export const useAppStore = create<AppState>((set) => ({
   diffRouteFocusGeomStatus: null,
   diffRoutesWithGeomChange: null,
   setDiffRoutesWithGeomChange: (diffRoutesWithGeomChange) => set({ diffRoutesWithGeomChange }),
+  diffRouteDirections: null,
+  setDiffRouteDirections: (diffRouteDirections) => set({ diffRouteDirections }),
   setDiffStopFocus: (diffStopFocus) => set({ diffStopFocus }),
   setDiffRouteFocus: (diffRouteFocus, candidates, geomStatus) =>
     set({
       diffRouteFocus,
       diffRouteCandidates: diffRouteFocus == null ? [] : candidates ?? [diffRouteFocus],
       diffRouteFocusGeomStatus: diffRouteFocus == null ? null : geomStatus ?? null,
+      // Changing the focused route always starts on "Entire line"; a caller
+      // that wants a specific direction sets it right after this call.
+      diffDirectionFocus: null,
       // Clearing the focus (e.g. the detail view's close button) also
       // returns to the split overview — mirrors the prototype's back-button
       // semantics for "nothing focused = show the overview".
@@ -530,6 +570,7 @@ export const useAppStore = create<AppState>((set) => ({
     diffRouteFocus: null,
     diffRouteCandidates: [],
     diffRouteFocusGeomStatus: null,
+    diffDirectionFocus: null,
     diffViewMode: 'overview',
   }),
   diffRouteZoomToken: 0,
@@ -539,8 +580,12 @@ export const useAppStore = create<AppState>((set) => ({
   setDiffViewMode: (diffViewMode) => set({ diffViewMode }),
   diffOverviewLayout: 'single',
   setDiffOverviewLayout: (diffOverviewLayout) => set({ diffOverviewLayout }),
+  mapCamera: null,
+  setMapCamera: (mapCamera) => set({ mapCamera }),
   diffDetailMode: 'colored',
   setDiffDetailMode: (diffDetailMode) => set({ diffDetailMode }),
+  diffDirectionFocus: null,
+  setDiffDirectionFocus: (diffDirectionFocus) => set({ diffDirectionFocus }),
 
   diffBasemapYear: null,
   setDiffBasemapYear: (diffBasemapYear) => set({ diffBasemapYear }),

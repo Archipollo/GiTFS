@@ -1,29 +1,33 @@
 // Single-map diff overview: the whole network on one map, all statuses
 // (added/removed/rerouted/unchanged) visible simultaneously. This is the
 // default diff-mode overview; SplitMapView (old feed / new feed side by
-// side) is an opt-in alternative toggled from DiffControlBar. Unlike the two
+// side) is an opt-in alternative toggled from the top bar. Unlike the two
 // SplitMapView panes, this single map also shows the stop-diff dots
 // (added/removed/moved/renamed, unchanged hidden by default) — one map
 // instance keeps the cost low enough that the "geometry-only" scope that
 // still applies to split view isn't needed here.
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import maplibregl, { type Map as MapLibreMap } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { useAppStore } from '../state/app-store';
 import type { DiffedShapes, GeomStatus } from '../gtfs/segment-graph';
-import { SEGMENT_COLOR, segmentDiffToGeoJSON, preferFeedKeepingReroutes } from '../gtfs/segment-graph';
+import { SEGMENT_COLOR, segmentDiffToGeoJSON, preferFeedKeepingReroutes, buildRunLineStatus } from '../gtfs/segment-graph';
 import { DIFF_COLOR, STOP_LEGEND, diffStopPoints, diffStopGhosts, diffMoveArrows } from './geojson';
 import { useDiff } from './useDiff';
 import { yearOfFeed } from '../timeline/math';
 import { BasemapControls } from '../map/BasemapControls';
 import { useBasemap } from '../map/basemap';
+import { usePersistedCamera } from '../map/usePersistedCamera';
 import {
   createDiffMapStyle,
   FIRST_DIFF_LAYER_ID,
   addDiffSegmentLayers,
   addDiffStopLayers,
   attachDiffSegmentClickHandler,
+  attachDiffStopClickHandler,
+  setDiffRouteHighlight,
+  setDiffStopHighlight,
   boundsOfLineFeatures,
   emptyFC,
   setSource,
@@ -43,15 +47,30 @@ export function NetworkDiffMapView({ diffedShapes }: { diffedShapes: DiffedShape
   const diffStopLabels = useAppStore((s) => s.diffStopLabels);
   const toggleDiffStopLabels = useAppStore((s) => s.toggleDiffStopLabels);
   const setDiffRouteFocus = useAppStore((s) => s.setDiffRouteFocus);
+  const setDiffStopFocus = useAppStore((s) => s.setDiffStopFocus);
+  const diffRouteFocus = useAppStore((s) => s.diffRouteFocus);
+  const diffStopFocus = useAppStore((s) => s.diffStopFocus);
   const activeFeedId = useAppStore((s) => s.activeFeedId);
   const compareFeedId = useAppStore((s) => s.compareFeedId);
   // Stop-diff shares the same cached (A,B) result the detail view already
   // computed — `useDiff` hits `peekDiff`, so this second caller adds no worker
   // work for a pair that's already been diffed.
   const diffStatus = useDiff(activeFeedId, compareFeedId);
+  // Route-identity projection so removed/added geometry on a *surviving* line
+  // renders as a reroute (yellow) rather than a line removal/addition.
+  const runLineStatus = useMemo(
+    () => (diffStatus.kind === 'ready' ? buildRunLineStatus(diffStatus.result.routes) : undefined),
+    [diffStatus],
+  );
   // Auto-fit once per feed pair — re-armed whenever `diffedShapes` swaps in a
   // new pair (see the effect below), so switching A/B refits the camera.
   const fittedForRef = useRef<DiffedShapes | null>(null);
+  // When we restore a persisted camera (a layout switch, not a fresh session),
+  // adopt the first rendered pair as already-fitted so the restore isn't
+  // clobbered — while still letting a later A/B swap refit (identity changes).
+  const skipInitialFitRef = useRef(!!useAppStore.getState().mapCamera);
+
+  const initialCamera = usePersistedCamera(mapRef, ready);
 
   // Satellite era follows the basemap-year slider (DiffTimelineStrip), falling
   // back to feed A's year — the same default the slider itself starts from.
@@ -67,8 +86,10 @@ export function NetworkDiffMapView({ diffedShapes }: { diffedShapes: DiffedShape
     const map = new maplibregl.Map({
       container: containerRef.current,
       style: createDiffMapStyle(),
-      center: INITIAL_CENTER,
-      zoom: INITIAL_ZOOM,
+      center: initialCamera?.center ?? INITIAL_CENTER,
+      zoom: initialCamera?.zoom ?? INITIAL_ZOOM,
+      bearing: initialCamera?.bearing ?? 0,
+      pitch: initialCamera?.pitch ?? 0,
     });
     map.addControl(new maplibregl.NavigationControl(), 'top-right');
     map.on('load', () => {
@@ -76,6 +97,7 @@ export function NetworkDiffMapView({ diffedShapes }: { diffedShapes: DiffedShape
       // Network overview: labels only once the user zooms into an area.
       addDiffStopLayers(map, { labelMinZoom: 12 });
       attachDiffSegmentClickHandler(map, setDiffRouteFocus);
+      attachDiffStopClickHandler(map, setDiffStopFocus);
       setReady(true);
     });
     mapRef.current = map;
@@ -97,15 +119,22 @@ export function NetworkDiffMapView({ diffedShapes }: { diffedShapes: DiffedShape
       diffedShapes,
       diffSegmentVisibility,
       preferFeedKeepingReroutes(diffedShapes),
+      runLineStatus,
     );
     setSource(map, 'diff-segments', features);
 
+    // Adopt the restored camera's pair as already-fitted (once), so a layout
+    // switch keeps the user's view instead of snapping back to the extent.
+    if (skipInitialFitRef.current) {
+      fittedForRef.current = diffedShapes;
+      skipInitialFitRef.current = false;
+    }
     if (fittedForRef.current !== diffedShapes) {
       const bounds = boundsOfLineFeatures(features);
       if (bounds) map.fitBounds(bounds, { padding: 40, duration: 0, maxZoom: 13 });
       fittedForRef.current = diffedShapes;
     }
-  }, [diffedShapes, diffSegmentVisibility, ready]);
+  }, [diffedShapes, diffSegmentVisibility, runLineStatus, ready]);
 
   // Stop-diff dots for the whole network. Unlike RouteDetailView these aren't
   // filtered to a single route — every changed stop is shown. `unchanged` is
@@ -131,8 +160,16 @@ export function NetworkDiffMapView({ diffedShapes }: { diffedShapes: DiffedShape
     map.setLayoutProperty('diff-stops-labels', 'visibility', diffStopLabels ? 'visible' : 'none');
   }, [diffStopLabels, ready]);
 
+  // Violet halo on the inspector-focused line/stop.
+  useEffect(() => {
+    if (mapRef.current && ready) setDiffRouteHighlight(mapRef.current, diffRouteFocus);
+  }, [diffRouteFocus, ready]);
+  useEffect(() => {
+    if (mapRef.current && ready) setDiffStopHighlight(mapRef.current, diffStopFocus);
+  }, [diffStopFocus, ready]);
+
   const legendItems: Array<{ id: GeomStatus; label: string }> = [
-    { id: 'unchanged', label: 'Shared geometry' },
+    { id: 'unchanged', label: 'Unchanged' },
     { id: 'removed', label: 'Removed' },
     { id: 'added', label: 'Added' },
     { id: 'changed', label: 'Rerouted' },

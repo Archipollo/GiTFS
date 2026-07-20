@@ -601,7 +601,6 @@ function DirectionColumn({
                 stopId={s.stopId}
                 stopName={s.stopName}
                 seq={s.seq}
-                idTag={s.stopId}
                 status={pillStatus}
                 selected={!!s.canonicalId && s.canonicalId === diffStopFocus}
                 onClick={() => onStopClick(s)}

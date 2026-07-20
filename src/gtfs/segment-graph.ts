@@ -19,7 +19,7 @@ import {
   type RoutePair,
 } from './segment-core';
 import type { ShapePolyline } from './queries';
-import type { DiffResult } from '../diff/engine';
+import type { DiffResult, RouteDiffEntry } from '../diff/engine';
 
 // Re-export types and pure computation for consumers that don't need
 // the caching layer (e.g. tests, the worker itself).
@@ -265,9 +265,37 @@ export function preferFeedKeepingReroutes(
   };
 }
 
-/** 'removed' | 'added' route-identity status for the route owning a run, or
- * null if that route's identity is unchanged/modified/renumbered. */
-export type RunLineStatus = 'removed' | 'added' | null;
+/**
+ * Route-identity status for the route owning a run:
+ * - `'removed'` / `'added'` — the whole line is gone / brand new.
+ * - `'present'` — the line exists in *both* feeds (unchanged/modified/renumbered),
+ *   so any dropped/added geometry on it is a **reroute**, not a line removal.
+ * - `null` — the run's canonical route couldn't be resolved.
+ *
+ * The positive `'present'` marker is what drives the yellow "rerouted" colouring
+ * of `geom_status:'removed'|'added'` runs (see `diffMapLayers.ts`). Its absence
+ * (`'none'`/`null`) falls back to the plain red/green, so a call site that forgets
+ * to pass the projection fails *safe* (removed line stays red) rather than
+ * mis-colouring a genuinely removed line as a reroute.
+ */
+export type RunLineStatus = 'removed' | 'added' | 'present' | null;
+
+/**
+ * Build the `lineStatus` projection for `segmentDiffToGeoJSON` from the entity
+ * diff: map each run's `canonicalId` to its owning route's identity status.
+ * `'modified'`/`'unchanged'`/`'renumbered'` all mean the line survives → `'present'`.
+ */
+export function buildRunLineStatus(routes: readonly RouteDiffEntry[]): (r: DiffedRun) => RunLineStatus {
+  const byCanonical = new Map<string, RunLineStatus>();
+  for (const entry of routes) {
+    const ls: RunLineStatus =
+      entry.status === 'removed' ? 'removed'
+      : entry.status === 'added' ? 'added'
+      : 'present';
+    byCanonical.set(entry.canonicalId, ls);
+  }
+  return (r) => byCanonical.get(r.canonicalId) ?? null;
+}
 
 function modeFlags(modes: readonly Mode[]): Record<string, boolean> {
   const effective = modes.length ? modes : (['other'] as Mode[]);
@@ -340,7 +368,9 @@ export function segmentDiffToGeoJSON(
       lengths[run.status] += lineLengthM(run.coords);
     }
     const ls = lineStatus(run);
-    if (ls && !isDupe) routeLengths[ls] += lineLengthM(run.coords);
+    // Only whole-line removals/additions count toward `routeLengths`; `'present'`
+    // (a surviving line, possibly rerouted) is tracked via the geometry `lengths`.
+    if ((ls === 'removed' || ls === 'added') && !isDupe) routeLengths[ls] += lineLengthM(run.coords);
     if (!visibility[run.status]) continue;
     if (isDupe) continue; // avoid drawing the same duplicate-owned-shape run twice
     features.push({
@@ -356,6 +386,7 @@ export function segmentDiffToGeoJSON(
         // — authoritative for click-to-focus, since a shape shared by
         // several routes is ambiguous to resolve after the fact.
         canonical_id: run.canonicalId,
+        direction_id: run.direction_id ?? null,
         feed: run.feed,
         primary_mode: run.primary_mode,
         ...modeFlags(run.modes),

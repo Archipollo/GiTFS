@@ -1,15 +1,19 @@
 // Searchable, filterable route list — the "line view" for diff mode.
 // Replaces the old per-route-status checkbox drawer: instead of toggling
 // map visibility per identity-status, this list is the primary way to pick
-// a route to inspect, driving `diffRouteFocus` + `diffViewMode`.
+// a route to inspect, driving `diffRouteFocus` + `diffViewMode`. Each row
+// with more than one isolable direction expands to per-direction sub-rows so
+// the map diff can be scoped to a single direction (see `diffDirectionFocus`).
 
 import { useMemo, useState } from 'react';
 import { useAppStore } from '../state/app-store';
 import { useDiff } from './useDiff';
 import { useDiffedShapes } from './useDiffedShapes';
+import { useLineDirections } from './useLineDirections';
 import { deriveLineListRows, type LineListRow, type LineListStatus } from './route-list';
 import { SEGMENT_COLOR } from '../gtfs/segment-graph';
 import { ModeSwatch } from '../inspector/components';
+import type { RouteDiffEntry } from './engine';
 
 const FILTERS: Array<{ id: LineListStatus | 'all'; label: string }> = [
   { id: 'all', label: 'All' },
@@ -32,12 +36,92 @@ function matchesSearch(row: LineListRow, needle: string): boolean {
   return haystack.includes(needle);
 }
 
+interface LineRowProps {
+  row: LineListRow;
+  entry: RouteDiffEntry | null;
+  feedA: string | null;
+  feedB: string | null;
+  isolableDirections: number[];
+  selected: boolean;
+  expanded: boolean;
+  directionFocus: number | null;
+  onSelect: () => void;
+  onToggleExpand: () => void;
+  onSelectDirection: (dir: number | null) => void;
+}
+
+function LineRow({
+  row, entry, feedA, feedB, isolableDirections,
+  selected, expanded, directionFocus,
+  onSelect, onToggleExpand, onSelectDirection,
+}: LineRowProps) {
+  const hasDirections = isolableDirections.length > 0;
+  // Only fetch headsigns once the row is actually opened.
+  const { headsigns } = useLineDirections(entry, feedA, feedB, expanded && hasDirections);
+  const badge = STATUS_BADGE[row.status];
+
+  return (
+    <div className={`line-list-item${selected ? ' selected' : ''}`}>
+      <div className="line-list-row-main">
+        <button
+          type="button"
+          className={`line-list-row${selected ? ' selected' : ''}`}
+          onClick={onSelect}
+        >
+          <ModeSwatch mode={row.mode} />
+          <span className="line-list-row-short">{row.shortName || '—'}</span>
+          <span className="line-list-row-long">{row.longName}</span>
+          <span className="line-list-row-badge" style={{ background: badge.bg, color: badge.fg }}>
+            {badge.label}
+          </span>
+        </button>
+        {hasDirections && (
+          <button
+            type="button"
+            className="line-list-expand"
+            aria-label={expanded ? 'Collapse directions' : 'Show directions'}
+            aria-expanded={expanded}
+            onClick={onToggleExpand}
+          >
+            {expanded ? '▾' : '▸'}
+          </button>
+        )}
+      </div>
+      {expanded && hasDirections && (
+        <div className="line-list-subrows">
+          <button
+            type="button"
+            className={`line-list-subrow${selected && directionFocus == null ? ' selected' : ''}`}
+            onClick={() => onSelectDirection(null)}
+          >
+            <span className="line-list-subrow-dir">Entire line</span>
+          </button>
+          {isolableDirections.map((id) => (
+            <button
+              key={id}
+              type="button"
+              className={`line-list-subrow${selected && directionFocus === id ? ' selected' : ''}`}
+              onClick={() => onSelectDirection(id)}
+            >
+              <span className="line-list-subrow-dir">Dir {id}</span>
+              <span className="line-list-subrow-headsign">{headsigns.get(id) || '—'}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function LineListSidebar() {
   const activeFeedId = useAppStore((s) => s.activeFeedId);
   const compareFeedId = useAppStore((s) => s.compareFeedId);
   const diffRouteFocus = useAppStore((s) => s.diffRouteFocus);
+  const diffDirectionFocus = useAppStore((s) => s.diffDirectionFocus);
   const setDiffRouteFocus = useAppStore((s) => s.setDiffRouteFocus);
+  const setDiffDirectionFocus = useAppStore((s) => s.setDiffDirectionFocus);
   const setDiffViewMode = useAppStore((s) => s.setDiffViewMode);
+  const diffRouteDirections = useAppStore((s) => s.diffRouteDirections);
 
   const diffStatus = useDiff(activeFeedId, compareFeedId);
   const diffedShapes = useDiffedShapes(diffStatus);
@@ -45,11 +129,20 @@ export function LineListSidebar() {
 
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<LineListStatus | 'all'>('all');
+  const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const rows = useMemo(() => {
     if (diffStatus.kind !== 'ready') return [];
     return deriveLineListRows(diffStatus.result.routes, routesWithGeomChange);
   }, [diffStatus, routesWithGeomChange]);
+
+  const entriesByCid = useMemo(() => {
+    const m = new Map<string, RouteDiffEntry>();
+    if (diffStatus.kind === 'ready') {
+      for (const e of diffStatus.result.routes) m.set(e.canonicalId, e);
+    }
+    return m;
+  }, [diffStatus]);
 
   const needle = search.trim().toLowerCase();
   const filteredRows = rows.filter(
@@ -58,9 +151,19 @@ export function LineListSidebar() {
 
   if (diffStatus.kind !== 'ready') return null;
 
-  const handleRowClick = (row: LineListRow) => {
-    setDiffRouteFocus(row.canonicalId, [row.canonicalId], null);
+  // Clicking a row: focus the whole line, open its detail view, and expand it
+  // to reveal its directions (matches "uncollapse after clicking").
+  const handleRowClick = (cid: string) => {
+    setDiffRouteFocus(cid, [cid], null);
     setDiffViewMode('detail');
+    setExpandedId(cid);
+  };
+
+  const handleSelectDirection = (cid: string, dir: number | null) => {
+    setDiffRouteFocus(cid, [cid], null); // resets direction to null…
+    setDiffDirectionFocus(dir); // …then apply the chosen one
+    setDiffViewMode('detail');
+    setExpandedId(cid);
   };
 
   return (
@@ -89,22 +192,22 @@ export function LineListSidebar() {
           <p className="muted" style={{ padding: '8px 6px' }}>No lines match.</p>
         )}
         {filteredRows.map((row) => (
-          <button
+          <LineRow
             key={row.canonicalId}
-            type="button"
-            className={`line-list-row${row.canonicalId === diffRouteFocus ? ' selected' : ''}`}
-            onClick={() => handleRowClick(row)}
-          >
-            <ModeSwatch mode={row.mode} />
-            <span className="line-list-row-short">{row.shortName || '—'}</span>
-            <span className="line-list-row-long">{row.longName}</span>
-            <span
-              className="line-list-row-badge"
-              style={{ background: STATUS_BADGE[row.status].bg, color: STATUS_BADGE[row.status].fg }}
-            >
-              {STATUS_BADGE[row.status].label}
-            </span>
-          </button>
+            row={row}
+            entry={entriesByCid.get(row.canonicalId) ?? null}
+            feedA={activeFeedId}
+            feedB={compareFeedId}
+            isolableDirections={diffRouteDirections?.get(row.canonicalId) ?? []}
+            selected={row.canonicalId === diffRouteFocus}
+            expanded={expandedId === row.canonicalId}
+            directionFocus={diffDirectionFocus}
+            onSelect={() => handleRowClick(row.canonicalId)}
+            onToggleExpand={() =>
+              setExpandedId((cur) => (cur === row.canonicalId ? null : row.canonicalId))
+            }
+            onSelectDirection={(dir) => handleSelectDirection(row.canonicalId, dir)}
+          />
         ))}
       </div>
     </div>

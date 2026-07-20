@@ -45,10 +45,23 @@ export function useDiffedShapes(diffStatus: DiffStatus): DiffedShapes | null {
         if (cancelled) return;
         setDiffedShapes(diffed);
         const changed = new Set<string>();
+        // Isolable directions per route: only runs carrying a real
+        // direction_id (route pair was splittable) — union runs (null) can't
+        // be filtered, so the line stays "Entire line" only.
+        const dirSets = new Map<string, Set<number>>();
         for (const run of diffed.runs) {
-          if (run.status !== 'unchanged' && run.canonicalId) changed.add(run.canonicalId);
+          if (!run.canonicalId) continue;
+          if (run.status !== 'unchanged') changed.add(run.canonicalId);
+          if (run.direction_id != null) {
+            let s = dirSets.get(run.canonicalId);
+            if (!s) { s = new Set(); dirSets.set(run.canonicalId, s); }
+            s.add(run.direction_id);
+          }
         }
+        const dirsByRoute = new Map<string, number[]>();
+        for (const [cid, s] of dirSets) dirsByRoute.set(cid, [...s].sort((x, y) => x - y));
         useAppStore.getState().setDiffRoutesWithGeomChange(changed);
+        useAppStore.getState().setDiffRouteDirections(dirsByRoute);
       } catch (err) {
         if (!cancelled) console.warn('diff-segments compute failed', err);
       }
@@ -56,6 +69,7 @@ export function useDiffedShapes(diffStatus: DiffStatus): DiffedShapes | null {
     return () => {
       cancelled = true;
       useAppStore.getState().setDiffRoutesWithGeomChange(null);
+      useAppStore.getState().setDiffRouteDirections(null);
     };
   }, [diffStatus]);
 

@@ -7,7 +7,7 @@ import { useEffect } from 'react';
 import { useAppStore } from '../state/app-store';
 import { useDiff } from './useDiff';
 import { useDiffedShapes } from './useDiffedShapes';
-import { segmentDiffToGeoJSON } from '../gtfs/segment-graph';
+import { segmentDiffToGeoJSON, buildRunLineStatus } from '../gtfs/segment-graph';
 import { SplitMapView } from './SplitMapView';
 import { NetworkDiffMapView } from './NetworkDiffMapView';
 import { RouteDetailView } from './RouteDetailView';
@@ -31,14 +31,20 @@ export function DiffMapArea() {
       setDiffSegmentSummary(null);
       return;
     }
-    const { lengths, routeLengths } = segmentDiffToGeoJSON(diffedShapes, diffSegmentVisibility);
+    const lineStatus = diffStatus.kind === 'ready' ? buildRunLineStatus(diffStatus.result.routes) : undefined;
+    const { lengths, routeLengths } = segmentDiffToGeoJSON(
+      diffedShapes,
+      diffSegmentVisibility,
+      undefined,
+      lineStatus,
+    );
     setDiffSegmentSummary({
       feedA: diffedShapes.feedA,
       feedB: diffedShapes.feedB,
       lengths,
       routeLengths,
     });
-  }, [diffedShapes, diffSegmentVisibility, setDiffSegmentSummary]);
+  }, [diffedShapes, diffSegmentVisibility, diffStatus, setDiffSegmentSummary]);
 
   // Timeline is a single-feed exploration layout — it doesn't need a computed
   // A/B diff, so it bypasses the "diff not ready" gate below.

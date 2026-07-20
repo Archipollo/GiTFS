@@ -11,8 +11,45 @@ import { basemapLayers, basemapSources } from '../map/basemap';
 import { useAppStore } from '../state/app-store';
 
 /** First layer added by `addDiffSegmentLayers` — the anchor a dynamically
- * inserted basemap (historical satellite) must slot in *below*. */
-export const FIRST_DIFF_LAYER_ID = 'diff-segments-unchanged-casing';
+ * inserted basemap (historical satellite) must slot in *below*. This is the
+ * focus glow (drawn beneath every status line), so a restored satellite still
+ * sits under the whole diff stack. */
+export const FIRST_DIFF_LAYER_ID = 'diff-segments-focus';
+
+/**
+ * Accent for the inspector-focused line/stop — a light tint of the GiTFS brand
+ * blue (`--accent` `#2d6cdf`, the "Load feeds" button colour). It's drawn at
+ * *full opacity* on purpose: the focused route's geometry has many overlapping
+ * runs (both directions, plus `unchanged` emitted from both feeds), and a
+ * translucent glow would compound its alpha where they overlap, making some
+ * stretches glow harder than others. An opaque line over an opaque line is
+ * identical to one line, so full opacity keeps the halo perfectly even; the
+ * light tint is what keeps it subtle instead of intense. Blue also can't be
+ * confused with any geometry status (green/red/gray/yellow).
+ */
+export const DIFF_FOCUS_COLOR = '#8fb3f0';
+
+/** MapLibre filter that matches nothing — the "no focus" state for a highlight layer. */
+const MATCH_NONE: maplibregl.FilterSpecification = ['==', ['literal', 1], ['literal', 0]];
+
+/** Point a highlight layer's filter at a single id, or hide it entirely when `id` is null. */
+function focusFilter(prop: string, id: string | null): maplibregl.FilterSpecification {
+  return id ? ['==', ['get', prop], id] : MATCH_NONE;
+}
+
+/** Highlight the focused route's runs (keyed on `canonical_id`); pass `null` to clear. */
+export function setDiffRouteHighlight(map: MapLibreMap, canonicalId: string | null): void {
+  if (map.getLayer('diff-segments-focus')) {
+    map.setFilter('diff-segments-focus', focusFilter('canonical_id', canonicalId));
+  }
+}
+
+/** Highlight the focused stop's dot (keyed on `canonicalId`); pass `null` to clear. */
+export function setDiffStopHighlight(map: MapLibreMap, canonicalId: string | null): void {
+  if (map.getLayer('diff-stop-focus-halo')) {
+    map.setFilter('diff-stop-focus-halo', focusFilter('canonicalId', canonicalId));
+  }
+}
 
 /**
  * A fresh style object per call — MapLibre mutates the style spec it's
@@ -195,6 +232,29 @@ export function addDiffSegmentLayers(map: MapLibreMap): void {
   map.addSource('diff-segments', { type: 'geojson', data: emptyFC() });
   addChevronImages(map);
 
+  // Soft blue glow beneath every status line, tracing the inspector-focused
+  // route (filter set via `setDiffRouteHighlight`; matches nothing until then).
+  // Kept at the bottom of the diff stack so the status colours draw on top and
+  // the glow only peeks out as a halo — subtle, not a recolour. Must stay the
+  // first diff layer: `FIRST_DIFF_LAYER_ID` points here so the satellite
+  // basemap slots in below the whole stack.
+  map.addLayer({
+    id: 'diff-segments-focus',
+    type: 'line',
+    source: 'diff-segments',
+    filter: MATCH_NONE,
+    layout: { 'line-cap': 'round', 'line-join': 'round' },
+    paint: {
+      'line-color': DIFF_FOCUS_COLOR,
+      'line-width': ['interpolate', ['linear'], ['zoom'], 8, 4, 14, 12],
+      // Full opacity — see DIFF_FOCUS_COLOR: a translucent glow compounds where
+      // the route's overlapping runs stack, making some stretches glow harder.
+      // Opaque keeps it even; the light tint keeps it subtle.
+      'line-opacity': 1,
+      'line-blur': ['interpolate', ['linear'], ['zoom'], 8, 1.5, 14, 3],
+    },
+  });
+
   map.addLayer({
     id: 'diff-segments-unchanged-casing',
     type: 'line',
@@ -205,7 +265,7 @@ export function addDiffSegmentLayers(map: MapLibreMap): void {
       'line-color': '#ffffff',
       'line-width': ['interpolate', ['linear'], ['zoom'], 8, 1.0, 14, 1.6],
       'line-gap-width': ['interpolate', ['linear'], ['zoom'], 8, 0.8, 14, 2.4],
-      'line-opacity': 0.85,
+      'line-opacity': 0.55,
     },
   });
   map.addLayer({
@@ -217,27 +277,34 @@ export function addDiffSegmentLayers(map: MapLibreMap): void {
     paint: {
       'line-color': SEGMENT_COLOR.unchanged,
       'line-width': ['interpolate', ['linear'], ['zoom'], 8, 0.8, 14, 2.4],
-      'line-opacity': 0.75,
+      'line-opacity': 0.55,
     },
   });
+  // 'removed'/'added' geometry is split by `line_status`: when the owning line
+  // still exists in both feeds (`line_status == 'present'`) the dropped/new
+  // stretch is a **reroute**, drawn yellow (dotted for old, solid for new) like
+  // the paired `changed` runs — so red/green stay reserved for whole-line
+  // removals/additions. The red/green layers match `!= 'present'` (covers both
+  // `'removed'`/`'added'` and the `'none'` fallback), so a view that omits the
+  // `lineStatus` projection fails safe to the plain colour instead of inverting.
   map.addLayer({
     id: 'diff-segments-removed-casing',
     type: 'line',
     source: 'diff-segments',
-    filter: ['==', ['get', 'geom_status'], 'removed'],
+    filter: ['all', ['==', ['get', 'geom_status'], 'removed'], ['!=', ['get', 'line_status'], 'present']],
     layout: { 'line-cap': 'round', 'line-join': 'round' },
     paint: {
       'line-color': '#ffffff',
       'line-width': ['interpolate', ['linear'], ['zoom'], 8, 1.0, 14, 1.6],
       'line-gap-width': ['interpolate', ['linear'], ['zoom'], 8, 1.8, 14, 4.0],
-      'line-opacity': 0.85,
+      'line-opacity': 0.95,
     },
   });
   map.addLayer({
     id: 'diff-segments-removed-line',
     type: 'line',
     source: 'diff-segments',
-    filter: ['==', ['get', 'geom_status'], 'removed'],
+    filter: ['all', ['==', ['get', 'geom_status'], 'removed'], ['!=', ['get', 'line_status'], 'present']],
     layout: { 'line-cap': 'round', 'line-join': 'round' },
     paint: {
       'line-color': SEGMENT_COLOR.removed,
@@ -245,11 +312,12 @@ export function addDiffSegmentLayers(map: MapLibreMap): void {
       'line-opacity': 0.95,
     },
   });
+  // Reroute — old geometry dropped from a surviving line: yellow dotted (mirrors changed/old).
   map.addLayer({
-    id: 'diff-segments-added-casing',
+    id: 'diff-segments-reroute-removed-casing',
     type: 'line',
     source: 'diff-segments',
-    filter: ['==', ['get', 'geom_status'], 'added'],
+    filter: ['all', ['==', ['get', 'geom_status'], 'removed'], ['==', ['get', 'line_status'], 'present']],
     layout: { 'line-cap': 'round', 'line-join': 'round' },
     paint: {
       'line-color': '#ffffff',
@@ -259,15 +327,67 @@ export function addDiffSegmentLayers(map: MapLibreMap): void {
     },
   });
   map.addLayer({
+    id: 'diff-segments-reroute-removed-line',
+    type: 'line',
+    source: 'diff-segments',
+    filter: ['all', ['==', ['get', 'geom_status'], 'removed'], ['==', ['get', 'line_status'], 'present']],
+    layout: { 'line-cap': 'round', 'line-join': 'round' },
+    paint: {
+      'line-color': SEGMENT_COLOR.changed,
+      'line-width': ['interpolate', ['linear'], ['zoom'], 8, 1.8, 14, 4.0],
+      'line-dasharray': [0, 2],
+      'line-opacity': 0.85,
+    },
+  });
+  map.addLayer({
+    id: 'diff-segments-added-casing',
+    type: 'line',
+    source: 'diff-segments',
+    filter: ['all', ['==', ['get', 'geom_status'], 'added'], ['!=', ['get', 'line_status'], 'present']],
+    layout: { 'line-cap': 'round', 'line-join': 'round' },
+    paint: {
+      'line-color': '#ffffff',
+      'line-width': ['interpolate', ['linear'], ['zoom'], 8, 1.0, 14, 1.6],
+      'line-gap-width': ['interpolate', ['linear'], ['zoom'], 8, 1.8, 14, 4.0],
+      'line-opacity': 0.55,
+    },
+  });
+  map.addLayer({
     id: 'diff-segments-added-line',
     type: 'line',
     source: 'diff-segments',
-    filter: ['==', ['get', 'geom_status'], 'added'],
+    filter: ['all', ['==', ['get', 'geom_status'], 'added'], ['!=', ['get', 'line_status'], 'present']],
     layout: { 'line-cap': 'round', 'line-join': 'round' },
     paint: {
       'line-color': SEGMENT_COLOR.added,
       'line-width': ['interpolate', ['linear'], ['zoom'], 8, 1.8, 14, 4.0],
-      'line-opacity': 0.95,
+      'line-opacity': 0.55,
+    },
+  });
+  // Reroute — new geometry added to a surviving line: yellow solid (mirrors changed/new).
+  map.addLayer({
+    id: 'diff-segments-reroute-added-casing',
+    type: 'line',
+    source: 'diff-segments',
+    filter: ['all', ['==', ['get', 'geom_status'], 'added'], ['==', ['get', 'line_status'], 'present']],
+    layout: { 'line-cap': 'round', 'line-join': 'round' },
+    paint: {
+      'line-color': '#ffffff',
+      'line-width': ['interpolate', ['linear'], ['zoom'], 8, 1.0, 14, 1.6],
+      'line-gap-width': ['interpolate', ['linear'], ['zoom'], 8, 1.8, 14, 4.0],
+      'line-opacity': 0.55,
+    },
+  });
+  map.addLayer({
+    id: 'diff-segments-reroute-added-line',
+    type: 'line',
+    source: 'diff-segments',
+    filter: ['all', ['==', ['get', 'geom_status'], 'added'], ['==', ['get', 'line_status'], 'present']],
+    layout: { 'line-cap': 'round', 'line-join': 'round' },
+    paint: {
+      'line-color': SEGMENT_COLOR.changed,
+      'line-width': ['interpolate', ['linear'], ['zoom'], 8, 1.8, 14, 4.0],
+      'line-opacity': 0.55,
     },
   });
   map.addLayer({
@@ -280,7 +400,7 @@ export function addDiffSegmentLayers(map: MapLibreMap): void {
       'line-color': '#ffffff',
       'line-width': ['interpolate', ['linear'], ['zoom'], 8, 1.0, 14, 1.6],
       'line-gap-width': ['interpolate', ['linear'], ['zoom'], 8, 1.8, 14, 4.0],
-      'line-opacity': 0.85,
+      'line-opacity': 0.55,
     },
   });
   map.addLayer({
@@ -292,8 +412,8 @@ export function addDiffSegmentLayers(map: MapLibreMap): void {
     paint: {
       'line-color': SEGMENT_COLOR.changed,
       'line-width': ['interpolate', ['linear'], ['zoom'], 8, 1.8, 14, 4.0],
-      'line-dasharray': [0, 4],
-      'line-opacity': 0.95,
+      'line-dasharray': [0, 2],
+      'line-opacity': 0.55,
     },
   });
   map.addLayer({
@@ -306,7 +426,7 @@ export function addDiffSegmentLayers(map: MapLibreMap): void {
       'line-color': '#ffffff',
       'line-width': ['interpolate', ['linear'], ['zoom'], 8, 1.0, 14, 1.6],
       'line-gap-width': ['interpolate', ['linear'], ['zoom'], 8, 1.8, 14, 4.0],
-      'line-opacity': 0.85,
+      'line-opacity': 0.55,
     },
   });
   map.addLayer({
@@ -318,7 +438,7 @@ export function addDiffSegmentLayers(map: MapLibreMap): void {
     paint: {
       'line-color': SEGMENT_COLOR.changed,
       'line-width': ['interpolate', ['linear'], ['zoom'], 8, 1.8, 14, 4.0],
-      'line-opacity': 0.95,
+      'line-opacity': 0.55,
     },
   });
 
@@ -340,7 +460,19 @@ export function addDiffSegmentLayers(map: MapLibreMap): void {
       // Sparse on purpose: chevrons only need to establish direction, and at
       // network scale a dense run of them reads as texture rather than arrows.
       'symbol-spacing': 200,
-      'icon-image': ['concat', CHEVRON_IMAGE_PREFIX, ['get', 'geom_status']],
+      // Reroute geometry (removed/added on a surviving line) uses the yellow
+      // 'changed' chevron to match its yellow line; everything else keys on
+      // its own geom_status (note unchanged runs are also 'present' — only
+      // removed/added are rewritten).
+      'icon-image': ['concat', CHEVRON_IMAGE_PREFIX, [
+        'case',
+        ['all',
+          ['==', ['get', 'line_status'], 'present'],
+          ['any', ['==', ['get', 'geom_status'], 'removed'], ['==', ['get', 'geom_status'], 'added']],
+        ],
+        'changed',
+        ['get', 'geom_status'],
+      ]],
       'icon-size': ['interpolate', ['linear'], ['zoom'], 11, 0.6, 15, 1],
       'icon-rotation-alignment': 'map',
       // Chevrons must follow the line's own direction even when it points
@@ -356,6 +488,8 @@ export function addDiffSegmentLayers(map: MapLibreMap): void {
 export const DIFF_SEGMENT_LINE_LAYERS = [
   'diff-segments-added-line',
   'diff-segments-removed-line',
+  'diff-segments-reroute-removed-line',
+  'diff-segments-reroute-added-line',
   'diff-segments-unchanged-line',
   'diff-segments-changed-old-line',
   'diff-segments-changed-new-line',
@@ -395,6 +529,30 @@ export function attachDiffSegmentClickHandler(
       setDiffRouteFocus(clickedCanonical, candidates.length ? candidates : [clickedCanonical]);
     });
   }
+}
+
+/**
+ * Wires up click-to-inspect on the diff-stop dots: a click focuses the
+ * clicked stop's canonical id via `setDiffStopFocus`, which drives the
+ * DiffInspector's stop card. Shared by all three diff views (network, split,
+ * route detail) so the small hit-testing block isn't duplicated. Mirrors
+ * `attachDiffSegmentClickHandler`; the two are independent, so clicking a dot
+ * that happens to sit on a line focuses the stop (and, if the line is also
+ * under the point, its route) — the inspector shows both cards.
+ */
+export function attachDiffStopClickHandler(
+  map: MapLibreMap,
+  setDiffStopFocus: (canonicalId: string | null) => void,
+): void {
+  map.on('mouseenter', 'diff-stops-circle', () => { map.getCanvas().style.cursor = 'pointer'; });
+  map.on('mouseleave', 'diff-stops-circle', () => { map.getCanvas().style.cursor = ''; });
+  map.on('click', 'diff-stops-circle', (evt) => {
+    const f = evt.features?.[0];
+    if (!f) return;
+    const canonicalId = String(f.properties?.canonicalId ?? '');
+    if (!canonicalId) return;
+    setDiffStopFocus(canonicalId);
+  });
 }
 
 /**
@@ -449,6 +607,23 @@ export function addDiffStopLayers(
       'circle-stroke-color': '#ffffff',
       'circle-stroke-width': 0.8,
       'circle-stroke-opacity': 0.35,
+    },
+  });
+  // Soft violet halo behind the inspector-focused stop (filter set via
+  // `setDiffStopHighlight`; matches nothing until then). Drawn before the dot
+  // layer so the status-coloured dot sits on top and the halo reads as an aura.
+  map.addLayer({
+    id: 'diff-stop-focus-halo',
+    type: 'circle',
+    source: 'diff-stops',
+    filter: MATCH_NONE,
+    paint: {
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 8, 7, 14, 15],
+      'circle-color': DIFF_FOCUS_COLOR,
+      // One halo per stop (no self-overlap), so opacity is even at any value;
+      // kept fairly solid to match the light-tint line glow's weight.
+      'circle-opacity': 0.85,
+      'circle-blur': 0.5,
     },
   });
   map.addLayer({

@@ -85,14 +85,13 @@ export interface StopPillProps {
   selected?: boolean;
   /** 1-based sequence number shown as a badge at the start of the pill. */
   seq?: number | null;
-  /** Optional raw-id chip shown after the name (e.g. diff mode "A:123"). */
-  idTag?: string | null;
   onClick?: () => void;
 }
 
 /**
  * Compact clickable chip listing a stop along a route. Optionally renders a
- * leading sequence number when the stop is part of an ordered list.
+ * leading sequence number when the stop is part of an ordered list. The raw
+ * stop id is available on hover via `title` rather than taking up row width.
  */
 export function StopPill({
   stopId,
@@ -100,7 +99,6 @@ export function StopPill({
   status,
   selected,
   seq,
-  idTag,
   onClick,
 }: StopPillProps) {
   return (
@@ -119,7 +117,6 @@ export function StopPill({
     >
       {seq != null && <span className="stop-pill-seq">{seq}</span>}
       <span className="stop-pill-name">{stopName || '(unnamed stop)'}</span>
-      {idTag && <span className="stop-pill-id">{idTag}</span>}
       <DiffStatusDot status={status ?? null} />
     </button>
   );

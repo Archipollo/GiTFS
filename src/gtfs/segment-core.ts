@@ -431,6 +431,14 @@ export interface DiffedRun {
   /** Canonical route id this run was scoped to (see `diffShapesByRoute`). */
   canonicalId: string;
   /**
+   * Dominant `direction_id` of the shape this run came from, so the detail
+   * view can isolate one direction. `null` means "no direction / union": the
+   * route pair couldn't be split by direction (see `splittableDirections`) or
+   * the shape carries no direction — such runs only ever show under
+   * "Entire line", never under a specific direction.
+   */
+  direction_id?: number | null;
+  /**
    * Set only when status === 'changed': which side of a paired reroute
    * this run is — the old (feed A) alignment or the new (feed B) one.
    * See `reclassifyReroutes`.
@@ -563,6 +571,11 @@ function gatherShapes(
   return out;
 }
 
+/** Normalize a dominant direction lookup: the `-1`/missing sentinel → `null`. */
+function normalizeDir(dir: number | undefined): number | null {
+  return dir != null && dir >= 0 ? dir : null;
+}
+
 /**
  * Partition one side's shapes by their dominant `direction_id`, so a
  * route's outbound geometry is only ever compared against the other feed's
@@ -654,11 +667,12 @@ export function diffShapesByRoute(
     canonicalId: string,
     aShapes: readonly ShapePolyline[],
     bShapes: readonly ShapePolyline[],
+    direction: number | null,
   ): void => {
     const idxA = buildShapeIndex(feedA, aShapes);
     const idxB = buildShapeIndex(feedB, bShapes);
     const diffed = diffShapes(idxA, idxB, smoothMinRunM);
-    const bucketRuns = diffed.runs.map((run) => ({ ...run, canonicalId }));
+    const bucketRuns = diffed.runs.map((run) => ({ ...run, canonicalId, direction_id: direction }));
     reclassifyReroutes(bucketRuns);
     for (const run of bucketRuns) runs.push(run);
   };
@@ -673,10 +687,11 @@ export function diffShapesByRoute(
       const dirs = splittableDirections(aByDir, bByDir);
       if (dirs) {
         for (const dir of dirs) {
-          diffBucket(pair.canonicalId, aByDir.get(dir)!, bByDir.get(dir)!);
+          diffBucket(pair.canonicalId, aByDir.get(dir)!, bByDir.get(dir)!, dir);
         }
       } else {
-        diffBucket(pair.canonicalId, aShapes, bShapes);
+        // Not splittable by direction — union diff, direction_id unknown.
+        diffBucket(pair.canonicalId, aShapes, bShapes, null);
       }
     } else if (aShapes.length) {
       for (const sh of aShapes) {
@@ -684,6 +699,7 @@ export function diffShapesByRoute(
           status: 'removed', coords: sh.coords,
           shape_id: sh.shape_id, route_id: sh.route_id, feed: 'a',
           modes: sh.modes, primary_mode: sh.primary_mode, canonicalId: pair.canonicalId,
+          direction_id: normalizeDir(shapeDirMapA.get(sh.shape_id)),
         });
       }
     } else if (bShapes.length) {
@@ -692,6 +708,7 @@ export function diffShapesByRoute(
           status: 'added', coords: sh.coords,
           shape_id: sh.shape_id, route_id: sh.route_id, feed: 'b',
           modes: sh.modes, primary_mode: sh.primary_mode, canonicalId: pair.canonicalId,
+          direction_id: normalizeDir(shapeDirMapB.get(sh.shape_id)),
         });
       }
     }

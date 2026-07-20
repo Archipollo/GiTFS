@@ -4,19 +4,6 @@
   height: 100vh;
   width: 100vw;
 }
-.app-root--diff-controls {
-  grid-template-rows: 48px 40px 1fr;
-}
-
-.diff-control-bar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 0 12px;
-  background: var(--bg-panel);
-  border-bottom: 1px solid var(--border);
-  overflow-x: auto;
-}
 .diff-pair.diff-pair--inline {
   flex-direction: row;
   align-items: center;
@@ -144,11 +131,17 @@
   background: var(--bg-panel);
   border-bottom: 1px solid var(--border);
 }
+.topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  justify-self: start;
+  min-width: 0;
+}
 .topbar .brand {
   font-weight: 600;
   color: var(--accent);
   letter-spacing: 0.5px;
-  justify-self: start;
 }
 .topbar-center {
   display: flex;
@@ -1347,7 +1340,7 @@
 /* Sequence-numbered variant: used in the "Stops along this line" list so
    riders can see the stop's real position along the route. */
 .stop-pill--seq {
-  grid-template-columns: 24px 1fr auto auto;
+  grid-template-columns: 24px 1fr auto;
 }
 .stop-pill-seq {
   display: inline-flex;
@@ -1367,19 +1360,6 @@
   background: rgba(45, 108, 223, 0.24);
   color: var(--accent);
 }
-.stop-pill-id {
-  font-family: ui-monospace, monospace;
-  font-size: 10px;
-  color: var(--fg-dim);
-  background: rgba(0, 0, 0, 0.04);
-  padding: 1px 5px;
-  border-radius: 3px;
-  max-width: 110px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 /* Direction ("course") pager shown above the stops list. */
 .route-course {
   margin-bottom: 8px;
@@ -1497,6 +1477,73 @@
   white-space: nowrap;
   justify-self: end;
 }
+.line-list-item {
+  display: flex;
+  flex-direction: column;
+}
+.line-list-row-main {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+}
+.line-list-row-main .line-list-row {
+  flex: 1;
+  min-width: 0;
+}
+.line-list-expand {
+  flex: 0 0 auto;
+  width: 22px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg-dim);
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+}
+.line-list-expand:hover {
+  background: #eef3fc;
+  color: var(--fg);
+}
+.line-list-subrows {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 1px 0 4px 22px;
+  padding-left: 8px;
+  border-left: 2px solid var(--border);
+}
+.line-list-subrow {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  color: var(--fg);
+}
+.line-list-subrow:hover { background: #eef3fc; }
+.line-list-subrow.selected {
+  border-color: var(--accent);
+  background: #dbe8ff;
+}
+.line-list-subrow-dir {
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--fg-dim);
+}
+.line-list-subrow-headsign {
+  font-size: 11px;
+  color: var(--fg-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
 
 /* Network diff map view (diff mode default overview) ---------------------- */
 
@@ -1577,21 +1624,57 @@
   background: var(--bg-panel);
   border-bottom: 1px solid var(--border);
 }
+/* Three flex groups so the direction switch sits at true header-center:
+   equal `flex: 1 1 0` on both side groups makes them equal width regardless
+   of content, and each group compresses internally instead of overlapping. */
+.route-detail-header-side {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1 1 0;
+  min-width: 0;
+}
+.route-detail-header-right {
+  justify-content: flex-end;
+}
 .route-detail-back {
   font-size: 12px;
   padding: 3px 8px;
 }
 .route-detail-title {
   flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
   font-weight: 600;
   font-size: 13px;
   white-space: nowrap;
   overflow: hidden;
+}
+.route-detail-subtitle {
+  font-weight: 500;
+  font-size: 11px;
+  color: var(--fg-dim);
+  white-space: nowrap;
+  overflow: hidden;
   text-overflow: ellipsis;
+  min-width: 0;
 }
 .route-detail-mode-switch {
   display: flex;
   gap: 2px;
+}
+.route-detail-dir-switch {
+  flex-wrap: nowrap;
+  max-width: 320px;
+}
+.route-detail-dir-switch button {
+  min-width: 0;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .route-detail-mode-switch button {
   font-size: 11px;

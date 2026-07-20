@@ -1,6 +1,5 @@
 import { useEffect, useState, useCallback, useRef, type MouseEvent as ReactMouseEvent } from 'react';
 import TopBar from './app-shell/TopBar';
-import DiffControlBar from './app-shell/DiffControlBar';
 import LeftPanel from './app-shell/LeftPanel';
 import RightPanel from './app-shell/RightPanel';
 import { DiffMapArea } from './diff/DiffMapArea';
@@ -52,9 +51,8 @@ export default function App() {
   const colWidth = rightVisible ? rightWidth : RIGHT_COLLAPSED;
 
   return (
-    <div className="app-root app-root--diff-controls">
+    <div className="app-root">
       <TopBar />
-      <DiffControlBar />
       <div className="app-body" style={{ gridTemplateColumns: `280px 1fr ${colWidth}px` }}>
         <LeftPanel />
         <main className="app-map">

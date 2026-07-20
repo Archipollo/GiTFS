@@ -30,6 +30,28 @@ export const STOP_LEGEND: Array<{ id: StopStatus; label: string }> = [
   { id: 'unchanged', label: 'Unchanged stop' },
 ];
 
+/**
+ * Narrows a diff result's stops to those actually served by a route+direction,
+ * keyed by real `stop_id` membership rather than proximity to the route's shape
+ * — two stop_ids can share a name and sit metres apart at an intersection
+ * (only one of them on this line), which a geometric radius can't tell apart.
+ * Falls back to no filtering when both id sets are empty (e.g. the feed lacks
+ * stop_times/trips, or direction data hasn't loaded yet) so this degrades to
+ * the caller's existing geometric filter instead of hiding every stop.
+ */
+export function filterStopsByRouteMembership(
+  result: DiffResult,
+  stopIds: { a: Set<string>; b: Set<string> },
+): DiffResult {
+  if (stopIds.a.size === 0 && stopIds.b.size === 0) return result;
+  const stops = result.stops.filter((e) => {
+    const inA = !!e.a && e.a.rawIds.some((id) => stopIds.a.has(id));
+    const inB = !!e.b && e.b.rawIds.some((id) => stopIds.b.has(id));
+    return inA || inB;
+  });
+  return { ...result, stops };
+}
+
 function mainPosition(e: StopDiffEntry): [number, number] | null {
   switch (e.status) {
     case 'added':

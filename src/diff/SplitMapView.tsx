@@ -5,23 +5,27 @@
 // stops appear on only the side that has them. Frequency stays route-scoped in
 // RouteDetailView.
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import maplibregl, { Map as MapLibreMap } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { useAppStore } from '../state/app-store';
 import type { DiffedShapes, GeomStatus } from '../gtfs/segment-graph';
-import { SEGMENT_COLOR, segmentDiffToGeoJSON, preferFeed } from '../gtfs/segment-graph';
+import { SEGMENT_COLOR, segmentDiffToGeoJSON, preferFeed, buildRunLineStatus } from '../gtfs/segment-graph';
 import { DIFF_COLOR, STOP_LEGEND, diffStopPointsForFeed } from './geojson';
 import { useDiff } from './useDiff';
 import { yearOfFeed } from '../timeline/math';
 import { BasemapControls } from '../map/BasemapControls';
 import { useBasemap } from '../map/basemap';
+import { usePersistedCamera } from '../map/usePersistedCamera';
 import {
   createDiffMapStyle,
   FIRST_DIFF_LAYER_ID,
   addDiffSegmentLayers,
   addDiffStopLayers,
   attachDiffSegmentClickHandler,
+  attachDiffStopClickHandler,
+  setDiffRouteHighlight,
+  setDiffStopHighlight,
   boundsOfLineFeatures,
   emptyFC,
   setSource,
@@ -53,14 +57,30 @@ function MapPane({ side, diffedShapes, otherMapRef, syncingRef, onReady }: PaneP
   const diffStopVisibility = useAppStore((s) => s.diffStopVisibility);
   const diffStopLabels = useAppStore((s) => s.diffStopLabels);
   const setDiffRouteFocus = useAppStore((s) => s.setDiffRouteFocus);
+  const setDiffStopFocus = useAppStore((s) => s.setDiffStopFocus);
+  const diffRouteFocus = useAppStore((s) => s.diffRouteFocus);
+  const diffStopFocus = useAppStore((s) => s.diffStopFocus);
   const activeFeedId = useAppStore((s) => s.activeFeedId);
   const compareFeedId = useAppStore((s) => s.compareFeedId);
   // Both panes read the same cached (A,B) diff — `useDiff` hits `peekDiff`, so
   // the second pane adds no worker work for an already-diffed pair.
   const diffStatus = useDiff(activeFeedId, compareFeedId);
+  const runLineStatus = useMemo(
+    () => (diffStatus.kind === 'ready' ? buildRunLineStatus(diffStatus.result.routes) : undefined),
+    [diffStatus],
+  );
   // Only the 'old' pane fits bounds — its 'move' handler syncs the 'new' pane
   // to match, so fitting both would race and jitter the camera.
   const fittedForRef = useRef<DiffedShapes | null>(null);
+  // Restored camera (a layout switch) counts as already-fitted for the 'old'
+  // pane, so switching into split keeps the current view; a later A/B swap
+  // still refits (pair identity changes).
+  const skipInitialFitRef = useRef(!!useAppStore.getState().mapCamera);
+
+  // Both panes construct from the shared camera so they start in sync, but only
+  // the driver ('old') pane writes moveend updates back — the 'new' pane merely
+  // follows via the 'move' sync below, so letting it write would double up.
+  const initialCamera = usePersistedCamera(mapRef, ready, side === 'old');
 
   // Each pane's satellite imagery matches the feed whose geometry it draws —
   // the same A/B mapping the segment source uses below — so the two panes show
@@ -78,8 +98,10 @@ function MapPane({ side, diffedShapes, otherMapRef, syncingRef, onReady }: PaneP
     const map = new maplibregl.Map({
       container: containerRef.current,
       style: createDiffMapStyle(),
-      center: INITIAL_CENTER,
-      zoom: INITIAL_ZOOM,
+      center: initialCamera?.center ?? INITIAL_CENTER,
+      zoom: initialCamera?.zoom ?? INITIAL_ZOOM,
+      bearing: initialCamera?.bearing ?? 0,
+      pitch: initialCamera?.pitch ?? 0,
     });
     map.addControl(new maplibregl.NavigationControl(), 'top-right');
     map.on('load', () => {
@@ -97,6 +119,7 @@ function MapPane({ side, diffedShapes, otherMapRef, syncingRef, onReady }: PaneP
       });
 
       attachDiffSegmentClickHandler(map, setDiffRouteFocus);
+      attachDiffStopClickHandler(map, setDiffStopFocus);
 
       // The other pane may already have fitted its camera while this one was
       // still loading — its 'move' sync would have found a null ref and given
@@ -134,6 +157,7 @@ function MapPane({ side, diffedShapes, otherMapRef, syncingRef, onReady }: PaneP
       diffedShapes,
       diffSegmentVisibility,
       preferFeed(side === 'old' ? 'a' : 'b'),
+      runLineStatus,
     );
     // Further restrict to this pane's side on top of the shared
     // diffSegmentVisibility toggle (both gate independently).
@@ -150,12 +174,18 @@ function MapPane({ side, diffedShapes, otherMapRef, syncingRef, onReady }: PaneP
     };
     setSource(map, 'diff-segments', sideFiltered);
 
-    if (side === 'old' && fittedForRef.current !== diffedShapes) {
-      const bounds = boundsOfLineFeatures(features);
-      if (bounds) map.fitBounds(bounds, { padding: 40, duration: 0, maxZoom: 13 });
-      fittedForRef.current = diffedShapes;
+    if (side === 'old') {
+      if (skipInitialFitRef.current) {
+        fittedForRef.current = diffedShapes;
+        skipInitialFitRef.current = false;
+      }
+      if (fittedForRef.current !== diffedShapes) {
+        const bounds = boundsOfLineFeatures(features);
+        if (bounds) map.fitBounds(bounds, { padding: 40, duration: 0, maxZoom: 13 });
+        fittedForRef.current = diffedShapes;
+      }
     }
-  }, [diffedShapes, diffSegmentVisibility, ready, side]);
+  }, [diffedShapes, diffSegmentVisibility, runLineStatus, ready, side]);
 
   // This pane's own stops, at this feed's positions. Ghost/arrow layers stay
   // empty here — displacement is shown by the moved stop appearing on both
@@ -180,6 +210,15 @@ function MapPane({ side, diffedShapes, otherMapRef, syncingRef, onReady }: PaneP
     if (!map || !ready || !map.getLayer('diff-stops-labels')) return;
     map.setLayoutProperty('diff-stops-labels', 'visibility', diffStopLabels ? 'visible' : 'none');
   }, [diffStopLabels, ready]);
+
+  // Violet halo on the inspector-focused line/stop, mirrored on both panes so a
+  // moved stop is highlighted at its before and after position at once.
+  useEffect(() => {
+    if (mapRef.current && ready) setDiffRouteHighlight(mapRef.current, diffRouteFocus);
+  }, [diffRouteFocus, ready]);
+  useEffect(() => {
+    if (mapRef.current && ready) setDiffStopHighlight(mapRef.current, diffStopFocus);
+  }, [diffStopFocus, ready]);
 
   return <div ref={containerRef} className="split-map-pane" />;
 }

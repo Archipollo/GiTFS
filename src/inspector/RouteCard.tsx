@@ -119,7 +119,6 @@ export default function RouteCard() {
                   stopId={s.stop_id}
                   stopName={s.stop_name}
                   seq={i + 1}
-                  idTag={s.stop_id}
                   selected={s.stop_id === selectedStopId}
                   onClick={() =>
                     setInspectorStop({
