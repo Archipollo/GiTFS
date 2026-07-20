@@ -221,7 +221,7 @@
 .upload-menu-popover {
   position: absolute;
   top: calc(100% + 6px);
-  right: 0;
+  left: 0;
   width: min(420px, 80vw);
   max-height: min(520px, 70vh);
   overflow: auto;
