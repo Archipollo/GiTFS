@@ -5,8 +5,6 @@ import type { StopStatus, RouteStatus } from '../diff/engine';
 import type { GeomStatus } from '../gtfs/segment-graph';
 import { yearOfFeed } from '../timeline/math';
 
-export type AppMode = 'timeline' | 'diff';
-
 export interface FeedMeta {
   id: string;
   label: string;
@@ -69,11 +67,23 @@ export interface PinnedEntity {
   label: string;
 }
 
-export type MapStyle = 'standard' | 'voyager' | 'dark';
+export type MapStyle = 'standard' | 'voyager' | 'dark' | 'positron';
+
+/** Persisted map camera, shared across the overview maps (network / split /
+ *  timeline) so switching layouts keeps the user's current view instead of
+ *  resetting to the all-Austria default. In-memory only — a page reload starts
+ *  fresh and lets the first auto-fit run. */
+export interface MapCamera {
+  center: [number, number];
+  zoom: number;
+  bearing: number;
+  pitch: number;
+}
 
 export interface AppState {
-  mode: AppMode;
-  setMode: (m: AppMode) => void;
+  /** Re-runs the oldest/newest-feed diff-pair auto-pick, run once at boot and
+   *  whenever the loaded feed set changes. */
+  autoPairDiffFeeds: () => void;
 
   mapStyle: MapStyle;
   setMapStyle: (s: MapStyle) => void;
@@ -91,6 +101,10 @@ export interface AppState {
   removeFeed: (id: string) => void;
   setActiveFeed: (id: string | null) => void;
   setCompareFeed: (id: string | null) => void;
+
+  /** TopBar feed-info popover (feed list + metadata) open/closed. */
+  feedBarOpen: boolean;
+  setFeedBarOpen: (v: boolean) => void;
 
   /**
    * The inspector has two independent slots (stop + route) so the user can
@@ -131,9 +145,13 @@ export interface AppState {
   setRegistryFocus: (f: RegistryFocus | null) => void;
 
   // Timeline mode ----------------------------------------------------------
-  /** Selected year (integer). Null until feeds are known; then snaps to one of them. */
-  timelineYear: number | null;
-  setTimelineYear: (year: number | null) => void;
+  /**
+   * Selected feed (by id), not year — two feeds can share a representative
+   * year, so the year alone can't identify which one is selected. Null
+   * until feeds are known; then snaps to one of them.
+   */
+  timelineFeedId: string | null;
+  setTimelineFeedId: (feedId: string | null) => void;
 
   /** Pinned canonical entities whose histories are shown in the inspector across years. */
   pinnedEntities: PinnedEntity[];
@@ -144,6 +162,9 @@ export interface AppState {
   /** Which change categories to show on the map / in the lists. */
   diffStopVisibility: Record<StopStatus, boolean>;
   toggleDiffStopVisibility: (s: StopStatus) => void;
+  /** Show station-name labels beneath stop dots (gated by zoom on the map). */
+  diffStopLabels: boolean;
+  toggleDiffStopLabels: () => void;
   /**
    * Lines in diff mode are compared at the geometry level (added / removed
    * / unchanged segments), so the per-route-entity statuses from the
@@ -195,11 +216,21 @@ export interface AppState {
    * spatial-grid pass twice.
    */
   diffSegmentSummary:
-    | { feedA: string; feedB: string; lengths: Record<GeomStatus, number> }
+    | {
+        feedA: string;
+        feedB: string;
+        lengths: Record<GeomStatus, number>;
+        routeLengths: { removed: number; added: number };
+      }
     | null;
   setDiffSegmentSummary: (
     s:
-      | { feedA: string; feedB: string; lengths: Record<GeomStatus, number> }
+      | {
+          feedA: string;
+          feedB: string;
+          lengths: Record<GeomStatus, number>;
+          routeLengths: { removed: number; added: number };
+        }
       | null,
   ) => void;
   diffRouteVisibility: Record<RouteStatus, boolean>;
@@ -222,9 +253,40 @@ export interface AppState {
    * clicking a line no longer commits to just the topmost one.
    */
   diffRouteCandidates: string[];
+  /**
+   * `geom_status` of the map segment that was actually clicked to set
+   * `diffRouteFocus`, when known. Distinct from the route's own entity
+   * status (added/removed/modified/unchanged): a route can be identity-
+   * `unchanged` while this particular stretch of its path is new or
+   * removed geometry (a reroute). Lets the inspector flag that mismatch
+   * instead of presenting them as if they were the same thing.
+   */
+  diffRouteFocusGeomStatus: 'unchanged' | 'added' | 'removed' | 'changed' | null;
+  /**
+   * Canonical route ids that have at least one non-`unchanged` geometry run
+   * somewhere along their path, computed once per feed pair from the
+   * segment diff. A route can be identity-`unchanged` yet have taken a
+   * different path on some stretch — the inspector uses this to avoid
+   * calling such a route "unchanged" when its geometry plainly isn't.
+   */
+  diffRoutesWithGeomChange: Set<string> | null;
+  setDiffRoutesWithGeomChange: (s: Set<string> | null) => void;
+  /**
+   * Canonical route id → the `direction_id`s whose geometry can actually be
+   * isolated on the map (i.e. the route pair was splittable by direction, so
+   * its runs carry a real direction_id — see `diffShapesByRoute`). Empty/absent
+   * means the line can only be shown as "Entire line". Drives which direction
+   * sub-rows the line-list offers and the detail view's direction filter.
+   */
+  diffRouteDirections: Map<string, number[]> | null;
+  setDiffRouteDirections: (m: Map<string, number[]> | null) => void;
   setDiffStopFocus: (canonicalId: string | null) => void;
   /** `candidates` defaults to `[canonicalId]` when omitted or null is passed. */
-  setDiffRouteFocus: (canonicalId: string | null, candidates?: string[]) => void;
+  setDiffRouteFocus: (
+    canonicalId: string | null,
+    candidates?: string[],
+    geomStatus?: 'unchanged' | 'added' | 'removed' | 'changed' | null,
+  ) => void;
   clearDiffFocus: () => void;
   /**
    * Bumped to request that MapView zoom/fit the camera to the full extent of
@@ -236,12 +298,80 @@ export interface AppState {
   requestDiffRouteZoom: () => void;
 
   /**
+   * Which top-level layout the diff map area shows: the two-map synchronized
+   * overview (all lines, split old/new) or the single-map detail view for
+   * one focused route. Clicking a line-list row or a map segment opens
+   * detail; the detail view's back button (or clearing the route focus)
+   * returns to overview.
+   */
+  diffViewMode: 'overview' | 'detail';
+  setDiffViewMode: (m: 'overview' | 'detail') => void;
+  /**
+   * Orthogonal to `diffViewMode`: within the overview, whether to show a
+   * single full-network map (all statuses at once, the default) or the
+   * synced old/new split view. Detail view is unaffected by this toggle.
+   */
+  diffOverviewLayout: 'single' | 'split' | 'timeline';
+  setDiffOverviewLayout: (l: 'single' | 'split' | 'timeline') => void;
+  /**
+   * Last camera the overview maps (network / split / timeline) were left at.
+   * Written on `moveend`, read once when a map is (re)constructed so switching
+   * layouts preserves the current view. Null until the first pan/zoom.
+   */
+  mapCamera: MapCamera | null;
+  setMapCamera: (c: MapCamera) => void;
+  /**
+   * Detail-view mode switch: show both feeds' geometry colored by diff
+   * status, or isolate just the old (feed A) or new (feed B) alignment.
+   */
+  diffDetailMode: 'colored' | 'old' | 'new';
+  setDiffDetailMode: (m: 'colored' | 'old' | 'new') => void;
+  /**
+   * Detail-view direction filter: `null` = "Entire line" (union of both
+   * directions, the default), or a specific `direction_id` to isolate one
+   * direction's geometry. Reset to `null` whenever the focused route changes
+   * so switching lines never carries a stale direction over.
+   */
+  diffDirectionFocus: number | null;
+  setDiffDirectionFocus: (dir: number | null) => void;
+
+  /**
    * Year to use for the Wayback satellite basemap in diff mode.
    * Null = follow feed A's year (default). Setting this never affects
    * the A/B feed pair — only the background imagery changes.
    */
   diffBasemapYear: number | null;
   setDiffBasemapYear: (year: number | null) => void;
+}
+
+/**
+ * Points the diff A/B pair at the oldest and newest loaded feed.
+ *
+ * The whole diff reads A as "before" and B as "after" — geometry only in A is
+ * `removed`, only in B is `added`, and a reroute draws A's alignment dotted
+ * against B's solid. Nothing downstream re-derives that from the feed dates,
+ * so a backwards pair silently inverts every old/new label on the map. Rather
+ * than warn about it, we always establish the chronological pair whenever the
+ * set of loaded feeds changes; the user can still override the slots by hand
+ * afterwards, and that choice stands until the next feed is loaded.
+ *
+ * Sorts on `repDate`, not `year`, so two feeds from the same year still order
+ * correctly.
+ */
+function autoPairDiffFeedsPatch(s: AppState): Partial<AppState> {
+  if (s.feedOrder.length < 2) return { compareFeedId: null };
+  const sorted = [...s.feedOrder].sort(
+    (a, b) => yearOfFeed(s.feeds[a]).repDate.getTime() - yearOfFeed(s.feeds[b]).repDate.getTime(),
+  );
+  const oldest = sorted[0] ?? null;
+  const newest = sorted[sorted.length - 1] ?? null;
+  if (!oldest || !newest || oldest === newest) return { compareFeedId: null };
+  return {
+    activeFeedId: oldest,
+    compareFeedId: newest,
+    inspectorStop: null,
+    inspectorRoute: null,
+  };
 }
 
 export function selectMapBusy(s: AppState): boolean {
@@ -263,43 +393,13 @@ export function selectMapBusyLabel(s: AppState): string {
 }
 
 export const useAppStore = create<AppState>((set) => ({
-  mapStyle: 'standard',
+  mapStyle: 'positron',
   setMapStyle: (mapStyle) => set({ mapStyle }),
 
   historicalBasemap: false,
   setHistoricalBasemap: (historicalBasemap) => set({ historicalBasemap }),
 
-  mode: 'timeline',
-  setMode: (mode) =>
-    set((s) => {
-      const cleared = { diffStopFocus: null, diffRouteFocus: null, diffRouteCandidates: [] as string[] };
-      if (mode !== 'diff') return { mode, ...cleared };
-      if (s.feedOrder.length < 2) return { mode, compareFeedId: null, ...cleared };
-      // Preserve an explicit pair the user already set up via the diff
-      // sidebar (they may want a non-standard ordering for a specific
-      // comparison). Otherwise, default to the canonical
-      // older-A → newer-B layout so "added" / "removed" read as
-      // changes from the past to the present.
-      if (s.compareFeedId && s.compareFeedId !== s.activeFeedId) {
-        return { mode, ...cleared };
-      }
-      const sorted = [...s.feedOrder].sort(
-        (a, b) => yearOfFeed(s.feeds[a]).year - yearOfFeed(s.feeds[b]).year,
-      );
-      const oldest = sorted[0] ?? null;
-      const newest = sorted[sorted.length - 1] ?? null;
-      if (!oldest || !newest || oldest === newest) {
-        return { mode, compareFeedId: null, ...cleared };
-      }
-      return {
-        mode,
-        activeFeedId: oldest,
-        compareFeedId: newest,
-        inspectorStop: null,
-        inspectorRoute: null,
-        ...cleared,
-      };
-    }),
+  autoPairDiffFeeds: () => set((s) => autoPairDiffFeedsPatch(s)),
 
   feeds: {},
   feedOrder: [],
@@ -307,11 +407,18 @@ export const useAppStore = create<AppState>((set) => ({
   compareFeedId: null,
 
   addFeed: (meta) =>
-    set((s) => ({
-      feeds: { ...s.feeds, [meta.id]: meta },
-      feedOrder: s.feedOrder.includes(meta.id) ? s.feedOrder : [...s.feedOrder, meta.id],
-      activeFeedId: s.activeFeedId ?? meta.id,
-    })),
+    set((s) => {
+      const next: AppState = {
+        ...s,
+        feeds: { ...s.feeds, [meta.id]: meta },
+        feedOrder: s.feedOrder.includes(meta.id) ? s.feedOrder : [...s.feedOrder, meta.id],
+        activeFeedId: s.activeFeedId ?? meta.id,
+      };
+      // Re-derive the chronological A/B pair against the enlarged feed set: a
+      // newly loaded feed can be the new oldest or newest, and leaving the old
+      // pair in place is what lets A end up holding the later feed.
+      return { ...next, ...autoPairDiffFeedsPatch(next) };
+    }),
   removeFeed: (id) => {
     removeFeedFromOPFS(id).catch((err) => console.warn('OPFS remove failed', err));
     set((s) => {
@@ -336,6 +443,10 @@ export const useAppStore = create<AppState>((set) => ({
     set((s) => ({
       compareFeedId: id === s.activeFeedId ? null : id,
     })),
+
+  feedBarOpen: false,
+  setFeedBarOpen: (feedBarOpen) => set({ feedBarOpen }),
+
   inspectorStop: null,
   inspectorRoute: null,
   inspectorSegment: null,
@@ -373,8 +484,8 @@ export const useAppStore = create<AppState>((set) => ({
   registryFocus: null,
   setRegistryFocus: (registryFocus) => set({ registryFocus }),
 
-  timelineYear: null,
-  setTimelineYear: (timelineYear) => set({ timelineYear }),
+  timelineFeedId: null,
+  setTimelineFeedId: (timelineFeedId) => set({ timelineFeedId }),
 
   pinnedEntities: [],
   addPinnedEntity: (p) =>
@@ -398,6 +509,8 @@ export const useAppStore = create<AppState>((set) => ({
     set((st) => ({
       diffStopVisibility: { ...st.diffStopVisibility, [s]: !st.diffStopVisibility[s] },
     })),
+  diffStopLabels: true,
+  toggleDiffStopLabels: () => set((st) => ({ diffStopLabels: !st.diffStopLabels })),
   diffRouteVisibility: {
     added: true,
     removed: true,
@@ -415,6 +528,7 @@ export const useAppStore = create<AppState>((set) => ({
     // Unchanged segments are the network background — on by default so the
     // user sees *where* the new/removed bits attach to the existing network.
     unchanged: true,
+    changed: true,
   },
   toggleDiffSegmentVisibility: (s) =>
     set((st) => ({
@@ -432,15 +546,46 @@ export const useAppStore = create<AppState>((set) => ({
   diffStopFocus: null,
   diffRouteFocus: null,
   diffRouteCandidates: [],
+  diffRouteFocusGeomStatus: null,
+  diffRoutesWithGeomChange: null,
+  setDiffRoutesWithGeomChange: (diffRoutesWithGeomChange) => set({ diffRoutesWithGeomChange }),
+  diffRouteDirections: null,
+  setDiffRouteDirections: (diffRouteDirections) => set({ diffRouteDirections }),
   setDiffStopFocus: (diffStopFocus) => set({ diffStopFocus }),
-  setDiffRouteFocus: (diffRouteFocus, candidates) =>
+  setDiffRouteFocus: (diffRouteFocus, candidates, geomStatus) =>
     set({
       diffRouteFocus,
       diffRouteCandidates: diffRouteFocus == null ? [] : candidates ?? [diffRouteFocus],
+      diffRouteFocusGeomStatus: diffRouteFocus == null ? null : geomStatus ?? null,
+      // Changing the focused route always starts on "Entire line"; a caller
+      // that wants a specific direction sets it right after this call.
+      diffDirectionFocus: null,
+      // Clearing the focus (e.g. the detail view's close button) also
+      // returns to the split overview — mirrors the prototype's back-button
+      // semantics for "nothing focused = show the overview".
+      ...(diffRouteFocus == null ? { diffViewMode: 'overview' as const } : {}),
     }),
-  clearDiffFocus: () => set({ diffStopFocus: null, diffRouteFocus: null, diffRouteCandidates: [] }),
+  clearDiffFocus: () => set({
+    diffStopFocus: null,
+    diffRouteFocus: null,
+    diffRouteCandidates: [],
+    diffRouteFocusGeomStatus: null,
+    diffDirectionFocus: null,
+    diffViewMode: 'overview',
+  }),
   diffRouteZoomToken: 0,
   requestDiffRouteZoom: () => set((s) => ({ diffRouteZoomToken: s.diffRouteZoomToken + 1 })),
+
+  diffViewMode: 'overview',
+  setDiffViewMode: (diffViewMode) => set({ diffViewMode }),
+  diffOverviewLayout: 'single',
+  setDiffOverviewLayout: (diffOverviewLayout) => set({ diffOverviewLayout }),
+  mapCamera: null,
+  setMapCamera: (mapCamera) => set({ mapCamera }),
+  diffDetailMode: 'colored',
+  setDiffDetailMode: (diffDetailMode) => set({ diffDetailMode }),
+  diffDirectionFocus: null,
+  setDiffDirectionFocus: (diffDirectionFocus) => set({ diffDirectionFocus }),
 
   diffBasemapYear: null,
   setDiffBasemapYear: (diffBasemapYear) => set({ diffBasemapYear }),

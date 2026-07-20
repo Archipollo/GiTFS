@@ -2,11 +2,12 @@ import { useEffect, useState, useCallback, useRef, type MouseEvent as ReactMouse
 import TopBar from './app-shell/TopBar';
 import LeftPanel from './app-shell/LeftPanel';
 import RightPanel from './app-shell/RightPanel';
-import MapView from './map/MapView';
+import { DiffMapArea } from './diff/DiffMapArea';
 import TimelineStrip from './timeline/TimelineStrip';
 import { DiffTimelineStrip } from './timeline/DiffTimelineStrip';
 import { rehydrateOnBoot } from './gtfs/feed-loader';
 import { rehydrateRegistryOnBoot } from './registry/registry';
+import { useAppStore } from './state/app-store';
 import './app-shell/layout.css';
 
 const RIGHT_MIN = 200;
@@ -18,10 +19,15 @@ export default function App() {
   const [rightWidth, setRightWidth] = useState(RIGHT_DEFAULT);
   const [rightVisible, setRightVisible] = useState(true);
   const dragRef = useRef<{ startX: number; startW: number } | null>(null);
+  const autoPairDiffFeeds = useAppStore((s) => s.autoPairDiffFeeds);
 
   useEffect(() => {
-    rehydrateOnBoot();
-    rehydrateRegistryOnBoot();
+    (async () => {
+      await rehydrateOnBoot();
+      rehydrateRegistryOnBoot();
+      autoPairDiffFeeds();
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleResizeStart = useCallback((e: ReactMouseEvent) => {
@@ -50,7 +56,7 @@ export default function App() {
       <div className="app-body" style={{ gridTemplateColumns: `280px 1fr ${colWidth}px` }}>
         <LeftPanel />
         <main className="app-map">
-          <MapView />
+          <DiffMapArea />
           <TimelineStrip />
           <DiffTimelineStrip />
         </main>

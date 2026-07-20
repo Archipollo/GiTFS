@@ -298,6 +298,24 @@ export function diffFeeds(
   };
 }
 
+/**
+ * Per-feed (raw route_id -> RouteStatus) lookup, derived from `result.routes`.
+ * Used by the map layer to tell whether the route that owns a piece of
+ * drawn geometry was itself removed/added, independent of whether its
+ * corridor is still physically covered by another route.
+ */
+export function buildRouteStatusByRawId(
+  result: DiffResult,
+): { a: Map<string, RouteStatus>; b: Map<string, RouteStatus> } {
+  const a = new Map<string, RouteStatus>();
+  const b = new Map<string, RouteStatus>();
+  for (const entry of result.routes) {
+    if (entry.a) for (const id of entry.a.rawIds) a.set(id, entry.status);
+    if (entry.b) for (const id of entry.b.rawIds) b.set(id, entry.status);
+  }
+  return { a, b };
+}
+
 function routeFingerprint(side: RouteSide): string | null {
   const longKey = normalizeLoose(side.longName);
   if (!longKey) return null; // not enough to be confident

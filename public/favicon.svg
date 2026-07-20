@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="#0f1115" stroke="#1b1f2a" stroke-width="2"/>
+
+  <!-- trunk line: the shared, unchanged corridor -->
+  <path d="M14 50 L26 38" fill="none" stroke="#6b7280" stroke-width="5" stroke-linecap="round"/>
+
+  <!-- fork: two diverging lines, git-branch style, echoing the diff view's added/removed segments -->
+  <path d="M26 38 L44 20" fill="none" stroke="#16a34a" stroke-width="5" stroke-linecap="round"/>
+  <path d="M26 38 L40 50" fill="none" stroke="#dc2626" stroke-width="5" stroke-linecap="round"/>
+
+  <!-- stop nodes -->
+  <circle cx="14" cy="50" r="4.5" fill="#e6e8ee"/>
+  <circle cx="26" cy="38" r="4.5" fill="#4fc3f7"/>
+  <circle cx="44" cy="20" r="4.5" fill="#e6e8ee"/>
+  <circle cx="40" cy="50" r="4.5" fill="#e6e8ee"/>
+</svg>

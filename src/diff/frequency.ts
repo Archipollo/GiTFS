@@ -134,12 +134,15 @@ export function getOrComputeFrequencyDiff(diff: DiffResult): Promise<FrequencyDi
 export const FREQUENCY_GAIN_COLOR = '#2563eb';
 /** Less service in B ("loss"). Amber/orange — colourblind-safe pairing with the gain colour. */
 export const FREQUENCY_LOSS_COLOR = '#ea580c';
-/** ~No change. */
-export const FREQUENCY_NEUTRAL_COLOR = '#94a3b8';
+/** ~No change. Matches `SEGMENT_COLOR.unchanged` so a zero-delta route reads
+ * the same as "unchanged" does in geometry-diff mode, rather than as a
+ * distinct tinted color that could be mistaken for a real change. */
+export const FREQUENCY_NEUTRAL_COLOR = '#475569';
 
-/** Line-width range in px (constant across zoom levels). */
-export const FREQUENCY_MIN_WIDTH = 1.2;
-export const FREQUENCY_MAX_WIDTH = 7;
+/** Line-width range in px, keyed to zoom (not delta magnitude — colour alone
+ * encodes the change). Matches the weight of the other diff line layers. */
+export const FREQUENCY_MIN_WIDTH = 1.4;
+export const FREQUENCY_MAX_WIDTH = 3.4;
 
 // ---- GeoJSON ----------------------------------------------------------------
 
