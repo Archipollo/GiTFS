@@ -2,8 +2,9 @@
 // the left and new feed on the right, panned/zoomed in lockstep. Each pane
 // draws its own feed's geometry plus that feed's stops (left = feed A, right =
 // feed B), so a moved stop shows displaced between the panes and added/removed
-// stops appear on only the side that has them. Frequency stays route-scoped in
-// RouteDetailView.
+// stops appear on only the side that has them. Frequency (toggled globally via
+// `analysisMode`) is inherently a cross-feed comparison, not per-side, so both
+// panes show the same network-wide overlay in place of their geometry layer.
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import maplibregl, { Map as MapLibreMap } from 'maplibre-gl';
@@ -13,6 +14,8 @@ import type { DiffedShapes, GeomStatus } from '../gtfs/segment-graph';
 import { SEGMENT_COLOR, segmentDiffToGeoJSON, preferFeed, buildRunLineStatus } from '../gtfs/segment-graph';
 import { DIFF_COLOR, STOP_LEGEND, diffStopPointsForFeed } from './geojson';
 import { useDiff } from './useDiff';
+import { getOrComputeFrequencyDiff, frequencyDiffToGeoJSON, filterFrequencyDiff, type FrequencyDiffResult } from './frequency';
+import { FrequencyLegend } from './FrequencyLegend';
 import { yearOfFeed } from '../timeline/math';
 import { BasemapControls } from '../map/BasemapControls';
 import { useBasemap } from '../map/basemap';
@@ -22,13 +25,17 @@ import {
   FIRST_DIFF_LAYER_ID,
   addDiffSegmentLayers,
   addDiffStopLayers,
+  addDiffFrequencyLayers,
   attachDiffSegmentClickHandler,
+  attachDiffFrequencyClickHandler,
   attachDiffStopClickHandler,
   setDiffRouteHighlight,
   setDiffStopHighlight,
   boundsOfLineFeatures,
   emptyFC,
   setSource,
+  ALL_SEGMENT_STATUSES_VISIBLE,
+  ALL_STOP_STATUSES_VISIBLE,
 } from './diffMapLayers';
 
 const INITIAL_CENTER: [number, number] = [14.55, 47.6];
@@ -59,9 +66,13 @@ function MapPane({ side, diffedShapes, otherMapRef, syncingRef, onReady }: PaneP
   const setDiffRouteFocus = useAppStore((s) => s.setDiffRouteFocus);
   const setDiffStopFocus = useAppStore((s) => s.setDiffStopFocus);
   const diffRouteFocus = useAppStore((s) => s.diffRouteFocus);
+  const diffDirectionFocus = useAppStore((s) => s.diffDirectionFocus);
   const diffStopFocus = useAppStore((s) => s.diffStopFocus);
   const activeFeedId = useAppStore((s) => s.activeFeedId);
   const compareFeedId = useAppStore((s) => s.compareFeedId);
+  const analysisMode = useAppStore((s) => s.analysisMode);
+  const setDiffFrequencySummary = useAppStore((s) => s.setDiffFrequencySummary);
+  const frequencyIncludeAddedRemoved = useAppStore((s) => s.frequencyIncludeAddedRemoved);
   // Both panes read the same cached (A,B) diff — `useDiff` hits `peekDiff`, so
   // the second pane adds no worker work for an already-diffed pair.
   const diffStatus = useDiff(activeFeedId, compareFeedId);
@@ -69,6 +80,19 @@ function MapPane({ side, diffedShapes, otherMapRef, syncingRef, onReady }: PaneP
     () => (diffStatus.kind === 'ready' ? buildRunLineStatus(diffStatus.result.routes) : undefined),
     [diffStatus],
   );
+
+  // Frequency overlay data — same cached (A,B) computation the other views use.
+  // Both panes call this, but `getOrComputeFrequencyDiff` caches per pair, so
+  // the second pane's call is free.
+  const [frequency, setFrequency] = useState<FrequencyDiffResult | null>(null);
+  useEffect(() => {
+    if (diffStatus.kind !== 'ready') { setFrequency(null); return; }
+    let cancelled = false;
+    getOrComputeFrequencyDiff(diffStatus.result)
+      .then((r) => { if (!cancelled) setFrequency(r); })
+      .catch((err) => console.warn('split frequency compute failed', err));
+    return () => { cancelled = true; };
+  }, [diffStatus]);
   // Only the 'old' pane fits bounds — its 'move' handler syncs the 'new' pane
   // to match, so fitting both would race and jitter the camera.
   const fittedForRef = useRef<DiffedShapes | null>(null);
@@ -108,6 +132,7 @@ function MapPane({ side, diffedShapes, otherMapRef, syncingRef, onReady }: PaneP
       addDiffSegmentLayers(map);
       // Split panes are network-scale like the overview: gate labels to z12+.
       addDiffStopLayers(map, { labelMinZoom: 12 });
+      addDiffFrequencyLayers(map);
 
       map.on('move', () => {
         if (syncingRef.current) return;
@@ -119,6 +144,7 @@ function MapPane({ side, diffedShapes, otherMapRef, syncingRef, onReady }: PaneP
       });
 
       attachDiffSegmentClickHandler(map, setDiffRouteFocus);
+      attachDiffFrequencyClickHandler(map, setDiffRouteFocus);
       attachDiffStopClickHandler(map, setDiffStopFocus);
 
       // The other pane may already have fitted its camera while this one was
@@ -172,7 +198,9 @@ function MapPane({ side, diffedShapes, otherMapRef, syncingRef, onReady }: PaneP
         return allowed.has(status);
       }),
     };
-    setSource(map, 'diff-segments', sideFiltered);
+    // Geometry-status and frequency are mutually exclusive overlays, same rule
+    // as the other diff map views.
+    setSource(map, 'diff-segments', analysisMode === 'frequency' ? emptyFC() : sideFiltered);
 
     if (side === 'old') {
       if (skipInitialFitRef.current) {
@@ -185,7 +213,60 @@ function MapPane({ side, diffedShapes, otherMapRef, syncingRef, onReady }: PaneP
         fittedForRef.current = diffedShapes;
       }
     }
-  }, [diffedShapes, diffSegmentVisibility, runLineStatus, ready, side]);
+  }, [diffedShapes, diffSegmentVisibility, runLineStatus, analysisMode, ready, side]);
+
+  // Always-on geometry backing this pane's focus glow — every status,
+  // unfiltered by the checkboxes, and never emptied in frequency mode (unlike
+  // `diff-segments` above) so a focused route stays highlighted in analysis
+  // view. Still scoped to this pane's own side, matching the display source.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    if (!diffedShapes) { setSource(map, 'diff-segments-focus-data', emptyFC()); return; }
+    const allowed = new Set(SIDE_STATUS[side]);
+    const { features } = segmentDiffToGeoJSON(
+      diffedShapes,
+      ALL_SEGMENT_STATUSES_VISIBLE,
+      preferFeed(side === 'old' ? 'a' : 'b'),
+      runLineStatus,
+    );
+    const sideFiltered: GeoJSON.FeatureCollection = {
+      type: 'FeatureCollection',
+      features: features.features.filter((feat) => {
+        const status = String(feat.properties?.geom_status ?? '') as GeomStatus;
+        if (status === 'changed') {
+          const wantSide = side === 'old' ? 'old' : 'new';
+          return feat.properties?.changed_side === wantSide;
+        }
+        return allowed.has(status);
+      }),
+    };
+    setSource(map, 'diff-segments-focus-data', sideFiltered);
+  }, [diffedShapes, runLineStatus, ready, side]);
+
+  // Frequency overlay — identical network-wide data on both panes (it's a
+  // cross-feed comparison, not something that splits by side).
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    if (!frequency || analysisMode !== 'frequency') {
+      setSource(map, 'diff-frequency', emptyFC());
+      return;
+    }
+    const filtered = filterFrequencyDiff(frequency, frequencyIncludeAddedRemoved);
+    setSource(map, 'diff-frequency', frequencyDiffToGeoJSON(filtered));
+    // Only the 'old' pane writes the shared legend summary, mirroring the
+    // "only 'old' fits bounds" convention above — avoids a duplicate write.
+    if (side === 'old') {
+      setDiffFrequencySummary({
+        feedA: filtered.feedA,
+        feedB: filtered.feedB,
+        maxAbsDelta: filtered.maxAbsDelta,
+        scaleAbsDelta: filtered.scaleAbsDelta,
+        routeCount: filtered.entries.length,
+      });
+    }
+  }, [frequency, analysisMode, ready, side, frequencyIncludeAddedRemoved, setDiffFrequencySummary]);
 
   // This pane's own stops, at this feed's positions. Ghost/arrow layers stay
   // empty here — displacement is shown by the moved stop appearing on both
@@ -204,6 +285,21 @@ function MapPane({ side, diffedShapes, otherMapRef, syncingRef, onReady }: PaneP
     );
   }, [diffStatus, diffStopVisibility, ready, side]);
 
+  // Always-on stop points backing this pane's focus halo — every status,
+  // unfiltered by the checkboxes (frequency mode zeroes them all), so a
+  // focused stop stays highlighted in analysis view. Still scoped to this
+  // pane's own side, matching the display source.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    if (diffStatus.kind !== 'ready') { setSource(map, 'diff-stops-focus-data', emptyFC()); return; }
+    setSource(
+      map,
+      'diff-stops-focus-data',
+      diffStopPointsForFeed(diffStatus.result, ALL_STOP_STATUSES_VISIBLE, side === 'old' ? 'a' : 'b'),
+    );
+  }, [diffStatus, ready, side]);
+
   // Station-name labels on/off (zoom gating is the layer's minzoom).
   useEffect(() => {
     const map = mapRef.current;
@@ -214,11 +310,52 @@ function MapPane({ side, diffedShapes, otherMapRef, syncingRef, onReady }: PaneP
   // Violet halo on the inspector-focused line/stop, mirrored on both panes so a
   // moved stop is highlighted at its before and after position at once.
   useEffect(() => {
-    if (mapRef.current && ready) setDiffRouteHighlight(mapRef.current, diffRouteFocus);
-  }, [diffRouteFocus, ready]);
+    if (mapRef.current && ready) setDiffRouteHighlight(mapRef.current, diffRouteFocus, diffDirectionFocus);
+  }, [diffRouteFocus, diffDirectionFocus, ready]);
   useEffect(() => {
     if (mapRef.current && ready) setDiffStopHighlight(mapRef.current, diffStopFocus);
   }, [diffStopFocus, ready]);
+
+  // Explicit re-fit to the focused line's full extent, requested via the
+  // inspector's "Show full line" button — mirrors NetworkDiffMapView's
+  // handling. Only the 'old' pane fits (its 'move' handler syncs 'new'),
+  // same convention as the initial network-wide auto-fit above.
+  const diffRouteZoomToken = useAppStore((s) => s.diffRouteZoomToken);
+  const isInitialZoomToken = useRef(true);
+  useEffect(() => {
+    if (isInitialZoomToken.current) { isInitialZoomToken.current = false; return; }
+    const map = mapRef.current;
+    if (!map || !ready || side !== 'old' || !diffRouteFocus) return;
+
+    let bounds: maplibregl.LngLatBoundsLike | null = null;
+    if (analysisMode === 'frequency' && frequency) {
+      const entry = frequency.entries.find((e) => e.canonicalId === diffRouteFocus);
+      if (entry?.coords) {
+        bounds = boundsOfLineFeatures({
+          type: 'FeatureCollection',
+          features: [{ type: 'Feature', geometry: { type: 'MultiLineString', coordinates: entry.coords }, properties: {} }],
+        });
+      }
+    }
+    if (!bounds && diffedShapes) {
+      const { features } = segmentDiffToGeoJSON(
+        diffedShapes,
+        ALL_SEGMENT_STATUSES_VISIBLE,
+        preferFeed(side === 'old' ? 'a' : 'b'),
+        runLineStatus,
+      );
+      bounds = boundsOfLineFeatures({
+        type: 'FeatureCollection',
+        features: features.features.filter((f) => f.properties?.canonical_id === diffRouteFocus),
+      });
+    }
+    if (bounds) map.fitBounds(bounds, { padding: 60, duration: 500, maxZoom: 15 });
+    // Deliberately keyed only on the token (plus `side`, which never changes
+    // for a mounted pane): a plain click on a line should focus/highlight it
+    // without zooming, so `diffRouteFocus` etc. must not be dependencies here
+    // — only the explicit "Show full line" button should trigger this fit.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [diffRouteZoomToken, ready, side]);
 
   return <div ref={containerRef} className="split-map-pane" />;
 }
@@ -233,6 +370,7 @@ export function SplitMapView({ diffedShapes }: { diffedShapes: DiffedShapes | nu
   const toggleDiffStopVisibility = useAppStore((s) => s.toggleDiffStopVisibility);
   const diffStopLabels = useAppStore((s) => s.diffStopLabels);
   const toggleDiffStopLabels = useAppStore((s) => s.toggleDiffStopLabels);
+  const analysisMode = useAppStore((s) => s.analysisMode);
 
   const legendItems: Array<{ id: GeomStatus; label: string }> = [
     { id: 'unchanged', label: 'Shared geometry' },
@@ -264,18 +402,20 @@ export function SplitMapView({ diffedShapes }: { diffedShapes: DiffedShapes | nu
         />
         <BasemapControls />
         <div className="map-mode-legend">
-          {legendItems.map(({ id, label }) => (
-            <label key={id} className={`diff-count ${diffSegmentVisibility[id] ? 'on' : 'off'}`}>
-              <input
-                type="checkbox"
-                checked={diffSegmentVisibility[id]}
-                onChange={() => toggleDiffSegmentVisibility(id)}
-              />
-              <span className="diff-count-swatch diff-count-swatch--line" style={{ background: SEGMENT_COLOR[id] }} />
-              <span className="diff-count-label">{label}</span>
-            </label>
-          ))}
-          {STOP_LEGEND.map(({ id, label }) => (
+          {analysisMode === 'frequency'
+            ? <FrequencyLegend />
+            : legendItems.map(({ id, label }) => (
+                <label key={id} className={`diff-count ${diffSegmentVisibility[id] ? 'on' : 'off'}`}>
+                  <input
+                    type="checkbox"
+                    checked={diffSegmentVisibility[id]}
+                    onChange={() => toggleDiffSegmentVisibility(id)}
+                  />
+                  <span className="diff-count-swatch diff-count-swatch--line" style={{ background: SEGMENT_COLOR[id] }} />
+                  <span className="diff-count-label">{label}</span>
+                </label>
+              ))}
+          {analysisMode !== 'frequency' && STOP_LEGEND.map(({ id, label }) => (
             <label key={id} className={`diff-count ${diffStopVisibility[id] ? 'on' : 'off'}`}>
               <input
                 type="checkbox"
@@ -286,11 +426,13 @@ export function SplitMapView({ diffedShapes }: { diffedShapes: DiffedShapes | nu
               <span className="diff-count-label">{label}</span>
             </label>
           ))}
-          <label className={`diff-count ${diffStopLabels ? 'on' : 'off'}`}>
-            <input type="checkbox" checked={diffStopLabels} onChange={toggleDiffStopLabels} />
-            <span className="diff-count-swatch diff-count-swatch--label">A</span>
-            <span className="diff-count-label">Station names</span>
-          </label>
+          {analysisMode !== 'frequency' && (
+            <label className={`diff-count ${diffStopLabels ? 'on' : 'off'}`}>
+              <input type="checkbox" checked={diffStopLabels} onChange={toggleDiffStopLabels} />
+              <span className="diff-count-swatch diff-count-swatch--label">A</span>
+              <span className="diff-count-label">Station names</span>
+            </label>
+          )}
         </div>
       </div>
     </div>

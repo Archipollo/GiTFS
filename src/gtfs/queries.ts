@@ -697,15 +697,17 @@ export async function fetchRouteWeeklyTrips(
 }
 
 /**
- * The most-common shape's coordinates for each route_id — a single
- * representative polyline per route, used to draw the diff-mode frequency
- * overlay (one line per route rather than one per shape variant).
+ * Every distinct shape's coordinates for each route_id, grouped by route —
+ * used to draw the frequency overlay. A route with branches or a looped
+ * variant has multiple shape_ids; using only the single most-tripped one
+ * would leave the branch/loop undrawn, so all variants are returned and
+ * rendered together as one multi-line feature per route.
  */
 export async function fetchRouteRepresentativeShapes(
   feedId: string,
   routeIds: string[],
-): Promise<Map<string, [number, number][]>> {
-  const out = new Map<string, [number, number][]>();
+): Promise<Map<string, [number, number][][]>> {
+  const out = new Map<string, [number, number][][]>();
   if (routeIds.length === 0) return out;
   await ensureFeedTablesLoaded(feedId);
   const conn = await getConnection();
@@ -719,34 +721,28 @@ export async function fetchRouteRepresentativeShapes(
     const inList = routeIds.map((id) => sqlStr(id)).join(', ');
 
     const res = await conn.query(`
-      WITH counts AS (
-        SELECT route_id, shape_id, COUNT(*) AS n
-        FROM ${trips}
-        WHERE route_id IN (${inList}) AND shape_id IS NOT NULL
-        GROUP BY route_id, shape_id
-      ),
-      best AS (
-        SELECT route_id, shape_id FROM (
-          SELECT route_id, shape_id,
-                 ROW_NUMBER() OVER (PARTITION BY route_id ORDER BY n DESC) AS rn
-          FROM counts
-        ) ranked
-        WHERE rn = 1
-      )
-      SELECT best.route_id AS route_id,
+      SELECT DISTINCT t.route_id AS route_id, t.shape_id AS shape_id,
              TRY_CAST(s.shape_pt_lon AS DOUBLE) AS lon,
              TRY_CAST(s.shape_pt_lat AS DOUBLE) AS lat,
              TRY_CAST(s.shape_pt_sequence AS INTEGER) AS seq
-      FROM best
-      JOIN ${shapes} s ON s.shape_id = best.shape_id
-      WHERE TRY_CAST(s.shape_pt_lon AS DOUBLE) IS NOT NULL
-      ORDER BY best.route_id, seq
+      FROM ${trips} t
+      JOIN ${shapes} s ON s.shape_id = t.shape_id
+      WHERE t.route_id IN (${inList}) AND t.shape_id IS NOT NULL
+        AND TRY_CAST(s.shape_pt_lon AS DOUBLE) IS NOT NULL
+      ORDER BY t.route_id, t.shape_id, seq
     `);
+    const byRouteShape = new Map<string, Map<string, [number, number][]>>();
     for (const row of res.toArray()) {
       const routeId = String(row.route_id);
-      let arr = out.get(routeId);
-      if (!arr) { arr = []; out.set(routeId, arr); }
+      const shapeId = String(row.shape_id);
+      let byShape = byRouteShape.get(routeId);
+      if (!byShape) { byShape = new Map(); byRouteShape.set(routeId, byShape); }
+      let arr = byShape.get(shapeId);
+      if (!arr) { arr = []; byShape.set(shapeId, arr); }
       arr.push([row.lon as number, row.lat as number]);
+    }
+    for (const [routeId, byShape] of byRouteShape) {
+      out.set(routeId, [...byShape.values()]);
     }
     return out;
   } finally {

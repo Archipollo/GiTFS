@@ -176,18 +176,33 @@ export interface AppState {
   diffSegmentVisibility: Record<GeomStatus, boolean>;
   toggleDiffSegmentVisibility: (s: GeomStatus) => void;
   /**
-   * Which overlay the diff-mode map shows for lines: geometry changes
-   * (added/removed/unchanged track, via `diffSegmentVisibility`) or the
-   * frequency overlay (trips/week gained or lost per route). Mutually
-   * exclusive — both drawn from overlapping shape data, so showing both
-   * at once would be unreadable.
+   * The active analysis overlay, available from every view (network overview,
+   * split view, route detail, and plain single-feed/timeline browsing) via the
+   * global Analysis menu in the top bar — not tied to diff mode. `'none'`
+   * means the ordinary geometry/status rendering is shown. An extensible
+   * string union so a future mode (e.g. `'population'`) slots in without
+   * touching any consumer's plumbing.
+   *
+   * Where a diff pair exists, `'frequency'` shows the trips/week gained or
+   * lost per route (mutually exclusive with the geometry-diff overlay — both
+   * drawn from overlapping shape data, so showing both at once would be
+   * unreadable). Where there's no diff pair (single-feed/timeline view),
+   * `'frequency'` shows each route's absolute trips/week instead.
    */
-  diffOverlay: 'geometry' | 'frequency';
-  setDiffOverlay: (o: 'geometry' | 'frequency') => void;
+  analysisMode: 'none' | 'frequency';
+  setAnalysisMode: (m: 'none' | 'frequency') => void;
   /**
-   * Frequency-overlay legend data, updated by the map after it computes the
-   * trips/week diff — mirrors `diffSegmentSummary`'s "compute once on the
-   * map, read from the sidebar" split.
+   * Whether added/removed routes (100%-swing deltas, since one side is 0)
+   * are included in the diff-mode frequency overlay's scale and rendering.
+   * Off by default — they otherwise stretch the scale so far that real
+   * frequency changes render thin and washed-out.
+   */
+  frequencyIncludeAddedRemoved: boolean;
+  setFrequencyIncludeAddedRemoved: (v: boolean) => void;
+  /**
+   * Frequency-overlay legend data for diff mode, updated by the map after it
+   * computes the trips/week diff — mirrors `diffSegmentSummary`'s "compute
+   * once on the map, read from the sidebar" split.
    */
   diffFrequencySummary:
     | {
@@ -205,6 +220,28 @@ export interface AppState {
           feedB: string;
           maxAbsDelta: number;
           scaleAbsDelta: number;
+          routeCount: number;
+        }
+      | null,
+  ) => void;
+  /**
+   * Frequency-overlay legend data for the no-diff-pair case (single-feed or
+   * timeline browsing): absolute trips/week per route, not a delta.
+   */
+  feedFrequencySummary:
+    | {
+        feedId: string;
+        maxWeeklyTrips: number;
+        scaleWeeklyTrips: number;
+        routeCount: number;
+      }
+    | null;
+  setFeedFrequencySummary: (
+    s:
+      | {
+          feedId: string;
+          maxWeeklyTrips: number;
+          scaleWeeklyTrips: number;
           routeCount: number;
         }
       | null,
@@ -537,10 +574,47 @@ export const useAppStore = create<AppState>((set) => ({
         [s]: !st.diffSegmentVisibility[s],
       },
     })),
-  diffOverlay: 'geometry',
-  setDiffOverlay: (diffOverlay) => set({ diffOverlay }),
+  analysisMode: 'none',
+  // Stops clutter the frequency overlay's line-color/width encoding, so
+  // entering frequency mode defaults them off — both the single-feed/timeline
+  // toggle (`showStops`) and every per-status diff-mode toggle
+  // (`diffStopVisibility`). The user can still switch them back on via
+  // whichever stops toggle their current view exposes.
+  setAnalysisMode: (analysisMode) =>
+    set((st) => {
+      if (analysisMode === 'frequency') {
+        return {
+          analysisMode,
+          showStops: false,
+          diffStopVisibility: Object.fromEntries(
+            Object.keys(st.diffStopVisibility).map((k) => [k, false]),
+          ) as typeof st.diffStopVisibility,
+        };
+      }
+      // Leaving frequency mode restores the identity-change categories
+      // (added/removed/moved/renamed) that entering it turned off —
+      // `unchanged` stays off, matching its own default.
+      if (st.analysisMode === 'frequency') {
+        return {
+          analysisMode,
+          showStops: true,
+          diffStopVisibility: {
+            ...st.diffStopVisibility,
+            added: true,
+            removed: true,
+            moved: true,
+            renamed: true,
+          },
+        };
+      }
+      return { analysisMode };
+    }),
+  frequencyIncludeAddedRemoved: false,
+  setFrequencyIncludeAddedRemoved: (v) => set({ frequencyIncludeAddedRemoved: v }),
   diffFrequencySummary: null,
   setDiffFrequencySummary: (diffFrequencySummary) => set({ diffFrequencySummary }),
+  feedFrequencySummary: null,
+  setFeedFrequencySummary: (feedFrequencySummary) => set({ feedFrequencySummary }),
   diffSegmentSummary: null,
   setDiffSegmentSummary: (diffSegmentSummary) => set({ diffSegmentSummary }),
   diffStopFocus: null,

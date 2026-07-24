@@ -5,10 +5,19 @@
 // cheap relative to the worker-side diff computation itself.
 
 import maplibregl, { type Map as MapLibreMap, type PointLike } from 'maplibre-gl';
-import { SEGMENT_COLOR } from '../gtfs/segment-graph';
+import { SEGMENT_COLOR, type GeomStatus } from '../gtfs/segment-graph';
 import { DIFF_COLOR } from './geojson';
+import type { StopStatus } from './engine';
 import { basemapLayers, basemapSources } from '../map/basemap';
 import { useAppStore } from '../state/app-store';
+import {
+  FREQUENCY_BIG_LOSS_COLOR,
+  FREQUENCY_SMALL_LOSS_COLOR,
+  FREQUENCY_NEUTRAL_COLOR,
+  FREQUENCY_SMALL_GAIN_COLOR,
+  FREQUENCY_BIG_GAIN_COLOR,
+  FREQUENCY_CLASS_BREAKS,
+} from './frequency';
 
 /** First layer added by `addDiffSegmentLayers` — the anchor a dynamically
  * inserted basemap (historical satellite) must slot in *below*. This is the
@@ -29,6 +38,21 @@ export const FIRST_DIFF_LAYER_ID = 'diff-segments-focus';
  */
 export const DIFF_FOCUS_COLOR = '#8fb3f0';
 
+/**
+ * Visibility records that hide nothing — for the focus glow/halo layers,
+ * which must keep tracing the inspector-focused route/stop's geometry no
+ * matter what the user has toggled off (status checkboxes) or which overlay
+ * is active (frequency mode empties the regular `diff-segments`/`diff-stops`
+ * sources those toggles gate; the focus layers read from their own always-on
+ * sources instead, see `diff-segments-focus-data`/`diff-stops-focus-data`).
+ */
+export const ALL_SEGMENT_STATUSES_VISIBLE: Record<GeomStatus, boolean> = {
+  added: true, removed: true, unchanged: true, changed: true,
+};
+export const ALL_STOP_STATUSES_VISIBLE: Record<StopStatus, boolean> = {
+  added: true, removed: true, moved: true, renamed: true, unchanged: true,
+};
+
 /** MapLibre filter that matches nothing — the "no focus" state for a highlight layer. */
 const MATCH_NONE: maplibregl.FilterSpecification = ['==', ['literal', 1], ['literal', 0]];
 
@@ -37,11 +61,26 @@ function focusFilter(prop: string, id: string | null): maplibregl.FilterSpecific
   return id ? ['==', ['get', prop], id] : MATCH_NONE;
 }
 
-/** Highlight the focused route's runs (keyed on `canonical_id`); pass `null` to clear. */
-export function setDiffRouteHighlight(map: MapLibreMap, canonicalId: string | null): void {
-  if (map.getLayer('diff-segments-focus')) {
-    map.setFilter('diff-segments-focus', focusFilter('canonical_id', canonicalId));
+/**
+ * Highlight the focused route's runs (keyed on `canonical_id`); pass `null` to
+ * clear. When `directionId` is given, the glow is additionally scoped to that
+ * direction's runs (see the inspector's per-direction focus) instead of the
+ * whole line.
+ */
+export function setDiffRouteHighlight(
+  map: MapLibreMap,
+  canonicalId: string | null,
+  directionId?: number | null,
+): void {
+  if (!map.getLayer('diff-segments-focus')) return;
+  if (!canonicalId) {
+    map.setFilter('diff-segments-focus', MATCH_NONE);
+    return;
   }
+  const filter: maplibregl.FilterSpecification = directionId == null
+    ? ['==', ['get', 'canonical_id'], canonicalId]
+    : ['all', ['==', ['get', 'canonical_id'], canonicalId], ['==', ['get', 'direction_id'], directionId]];
+  map.setFilter('diff-segments-focus', filter);
 }
 
 /** Highlight the focused stop's dot (keyed on `canonicalId`); pass `null` to clear. */
@@ -150,16 +189,21 @@ export function filterFeaturesNearRoute(
   };
 }
 
-/** Bounding box of every coordinate in a FeatureCollection's LineString geometries, or `null` if empty. */
+/** Bounding box of every coordinate in a FeatureCollection's LineString/MultiLineString
+ * geometries, or `null` if empty. */
 export function boundsOfLineFeatures(fc: GeoJSON.FeatureCollection): maplibregl.LngLatBoundsLike | null {
   let minLon = Infinity, maxLon = -Infinity, minLat = Infinity, maxLat = -Infinity;
+  const grow = ([lon, lat]: GeoJSON.Position) => {
+    if (lon < minLon) minLon = lon;
+    if (lon > maxLon) maxLon = lon;
+    if (lat < minLat) minLat = lat;
+    if (lat > maxLat) maxLat = lat;
+  };
   for (const feature of fc.features) {
-    if (feature.geometry.type !== 'LineString') continue;
-    for (const [lon, lat] of feature.geometry.coordinates) {
-      if (lon < minLon) minLon = lon;
-      if (lon > maxLon) maxLon = lon;
-      if (lat < minLat) minLat = lat;
-      if (lat > maxLat) maxLat = lat;
+    if (feature.geometry.type === 'LineString') {
+      feature.geometry.coordinates.forEach(grow);
+    } else if (feature.geometry.type === 'MultiLineString') {
+      feature.geometry.coordinates.forEach((line) => line.forEach(grow));
     }
   }
   if (minLon === Infinity) return null;
@@ -230,6 +274,12 @@ function addChevronImages(map: MapLibreMap): void {
 /** Diff-segment (line geometry) source + layers — the shared geometry-diff visual language. */
 export function addDiffSegmentLayers(map: MapLibreMap): void {
   map.addSource('diff-segments', { type: 'geojson', data: emptyFC() });
+  // Always carries the focused route's full geometry (every status, every
+  // side), independent of the status checkboxes and of `analysisMode` — so
+  // switching into frequency view (which empties `diff-segments`) doesn't
+  // also erase the glow. Populated via `setSource(map, 'diff-segments-focus-data', ...)`
+  // by the view components, using `ALL_SEGMENT_STATUSES_VISIBLE`.
+  map.addSource('diff-segments-focus-data', { type: 'geojson', data: emptyFC() });
   addChevronImages(map);
 
   // Soft blue glow beneath every status line, tracing the inspector-focused
@@ -241,7 +291,7 @@ export function addDiffSegmentLayers(map: MapLibreMap): void {
   map.addLayer({
     id: 'diff-segments-focus',
     type: 'line',
-    source: 'diff-segments',
+    source: 'diff-segments-focus-data',
     filter: MATCH_NONE,
     layout: { 'line-cap': 'round', 'line-join': 'round' },
     paint: {
@@ -532,6 +582,42 @@ export function attachDiffSegmentClickHandler(
 }
 
 /**
+ * Wires up click-to-focus on the frequency-overlay line: same behaviour as
+ * `attachDiffSegmentClickHandler` (select the route in the inspector without
+ * jumping into the detail view), just keyed on the frequency layer's
+ * `canonicalId` property instead of the segment layers' `canonical_id`.
+ * Independent of the segment handler so a view can wire whichever overlay is
+ * actually visible for the current `analysisMode`.
+ */
+export function attachDiffFrequencyClickHandler(
+  map: MapLibreMap,
+  setDiffRouteFocus: (canonicalId: string, candidates: string[]) => void,
+): void {
+  const layerId = 'diff-frequency-line';
+  map.on('mouseenter', layerId, () => { map.getCanvas().style.cursor = 'pointer'; });
+  map.on('mouseleave', layerId, () => { map.getCanvas().style.cursor = ''; });
+  map.on('click', layerId, (evt) => {
+    const f = evt.features?.[0];
+    if (!f) return;
+    const metersPerPixel =
+      (156543.03392 * Math.cos((evt.lngLat.lat * Math.PI) / 180)) / Math.pow(2, map.getZoom());
+    const targetMeters = 8;
+    const radiusPx = Math.min(4, Math.max(1, targetMeters / metersPerPixel));
+    const bbox: [PointLike, PointLike] = [
+      [evt.point.x - radiusPx, evt.point.y - radiusPx],
+      [evt.point.x + radiusPx, evt.point.y + radiusPx],
+    ];
+    const allFeatures = map.queryRenderedFeatures(bbox, { layers: [layerId] });
+    const candidates = [...new Set(
+      allFeatures.map((feat) => String(feat.properties?.canonicalId ?? '')).filter(Boolean),
+    )];
+    const clickedCanonical = String(f.properties?.canonicalId ?? '') || candidates[0];
+    if (!clickedCanonical) return;
+    setDiffRouteFocus(clickedCanonical, candidates.length ? candidates : [clickedCanonical]);
+  });
+}
+
+/**
  * Wires up click-to-inspect on the diff-stop dots: a click focuses the
  * clicked stop's canonical id via `setDiffStopFocus`, which drives the
  * DiffInspector's stop card. Shared by all three diff views (network, split,
@@ -572,6 +658,12 @@ export function addDiffStopLayers(
   map.addSource('diff-stops', { type: 'geojson', data: emptyFC() });
   map.addSource('diff-ghost', { type: 'geojson', data: emptyFC() });
   map.addSource('diff-arrow', { type: 'geojson', data: emptyFC() });
+  // Always carries every stop (all statuses), independent of the status
+  // checkboxes — so the focused stop's halo survives both the "unchanged off
+  // by default" default and frequency mode zeroing every status toggle.
+  // Populated via `setSource(map, 'diff-stops-focus-data', ...)` by the view
+  // components, using `ALL_STOP_STATUSES_VISIBLE`.
+  map.addSource('diff-stops-focus-data', { type: 'geojson', data: emptyFC() });
 
   const DIFF_COLOR_EXPR: maplibregl.ExpressionSpecification = [
     'match',
@@ -615,7 +707,7 @@ export function addDiffStopLayers(
   map.addLayer({
     id: 'diff-stop-focus-halo',
     type: 'circle',
-    source: 'diff-stops',
+    source: 'diff-stops-focus-data',
     filter: MATCH_NONE,
     paint: {
       'circle-radius': ['interpolate', ['linear'], ['zoom'], 8, 7, 14, 15],
@@ -672,8 +764,30 @@ export function addDiffStopLayers(
 export function addDiffFrequencyLayers(map: MapLibreMap): void {
   map.addSource('diff-frequency', { type: 'geojson', data: emptyFC() });
   const colorExpr: maplibregl.ExpressionSpecification = [
-    'interpolate', ['linear'], ['get', 'delta_norm'],
-    -1, '#ea580c', 0, '#475569', 1, '#2563eb',
+    'step', ['get', 'delta_norm'],
+    FREQUENCY_BIG_LOSS_COLOR,
+    FREQUENCY_CLASS_BREAKS[0], FREQUENCY_SMALL_LOSS_COLOR,
+    FREQUENCY_CLASS_BREAKS[1], FREQUENCY_NEUTRAL_COLOR,
+    FREQUENCY_CLASS_BREAKS[2], FREQUENCY_SMALL_GAIN_COLOR,
+    FREQUENCY_CLASS_BREAKS[3], FREQUENCY_BIG_GAIN_COLOR,
+  ];
+  // Width now also encodes the *size* of the change (not just zoom): a route
+  // near zero delta renders near the thin end regardless of zoom, while one
+  // at or beyond the p95 cap renders near the thick end — so "how much more
+  // or less frequented" reads directly off the line without a click.
+  // MapLibre allows only one zoom-based interpolate per expression, and it
+  // must be the top-level expression — so zoom is the outer interpolate,
+  // magnitude the (zoom-free) inner one, and the casing's "+2px" offset is
+  // baked into its own copy's stops rather than wrapped around the line's.
+  const magnitudeWidthExpr: maplibregl.ExpressionSpecification = [
+    'interpolate', ['linear'], ['zoom'],
+    8, ['interpolate', ['linear'], ['abs', ['get', 'delta_norm']], 0, 1, 1, 2.2],
+    14, ['interpolate', ['linear'], ['abs', ['get', 'delta_norm']], 0, 1.6, 1, 5.4],
+  ];
+  const magnitudeCasingWidthExpr: maplibregl.ExpressionSpecification = [
+    'interpolate', ['linear'], ['zoom'],
+    8, ['interpolate', ['linear'], ['abs', ['get', 'delta_norm']], 0, 3, 1, 4.2],
+    14, ['interpolate', ['linear'], ['abs', ['get', 'delta_norm']], 0, 3.6, 1, 7.4],
   ];
   map.addLayer({
     id: 'diff-frequency-casing',
@@ -682,7 +796,7 @@ export function addDiffFrequencyLayers(map: MapLibreMap): void {
     layout: { 'line-cap': 'round', 'line-join': 'round' },
     paint: {
       'line-color': '#ffffff',
-      'line-width': ['interpolate', ['linear'], ['zoom'], 8, 3.4, 14, 5.4],
+      'line-width': magnitudeCasingWidthExpr,
       'line-opacity': 0.55,
     },
   });
@@ -693,7 +807,7 @@ export function addDiffFrequencyLayers(map: MapLibreMap): void {
     layout: { 'line-cap': 'round', 'line-join': 'round' },
     paint: {
       'line-color': colorExpr,
-      'line-width': ['interpolate', ['linear'], ['zoom'], 8, 1.4, 14, 3.4],
+      'line-width': magnitudeWidthExpr,
       'line-opacity': 0.95,
     },
   });

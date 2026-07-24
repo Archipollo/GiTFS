@@ -16,12 +16,27 @@ import {
   type ShapePolyline,
 } from '../gtfs/queries';
 import { MODES, MODE_COLOR, MODE_LABEL, type Mode } from '../gtfs/modes';
+import {
+  getOrComputeFeedFrequency,
+  feedFrequencyToGeoJSON,
+  FEED_FREQUENCY_LOWEST_COLOR,
+  FEED_FREQUENCY_LOW_COLOR,
+  FEED_FREQUENCY_MID_COLOR,
+  FEED_FREQUENCY_HIGH_COLOR,
+  FEED_FREQUENCY_HIGHEST_COLOR,
+  FEED_FREQUENCY_CLASS_BREAKS,
+  FEED_FREQUENCY_MIN_WIDTH,
+  FEED_FREQUENCY_MAX_WIDTH,
+  type FeedFrequencyResult,
+} from '../gtfs/frequency';
+import { FrequencyLegend } from '../diff/FrequencyLegend';
 import MapOverlay from './MapOverlay';
 import { BasemapControls } from './BasemapControls';
 import { basemapLayers, basemapSources, useBasemap } from './basemap';
 import { useRegistry } from '../registry/useRegistry';
 import { lookupStop, lookupRoute } from '../registry/registry';
 import { dropDiffCache, dropShapeIndex } from '../gtfs/segment-graph';
+import { dropFeedFrequencyCache } from '../gtfs/frequency';
 import { getRoutesForShape, getRouteDirections } from '../inspector/data';
 import { usePersistedCamera } from './usePersistedCamera';
 
@@ -75,6 +90,8 @@ export default function MapView() {
   const registrySnapshot = useRegistry();
   const registryFocus = useAppStore((s) => s.registryFocus);
   const pinnedEntities = useAppStore((s) => s.pinnedEntities);
+  const analysisMode = useAppStore((s) => s.analysisMode);
+  const setFeedFrequencySummary = useAppStore((s) => s.setFeedFrequencySummary);
 
   // Prebuilt-GeoJSON cache keyed by feedId. Populated lazily on first view of
   // a feed and proactively by the background prefetcher. Once a feed is here,
@@ -136,6 +153,55 @@ export default function MapView() {
       map.addSource('inspector-route-stops', { type: 'geojson', data: emptyFC() });
       map.addSource('inspector-stop', { type: 'geojson', data: emptyFC() });
       map.addSource('inspector-shape', { type: 'geojson', data: emptyFC() });
+      map.addSource('analysis-frequency', { type: 'geojson', data: emptyFC() });
+      // Width encodes trips/week (not just zoom): a low-frequency route stays
+      // near the thin end at any zoom, a high-frequency one renders near the
+      // thick end — same "magnitude in the line itself" treatment as the
+      // diff-mode frequency overlay.
+      // MapLibre allows only one zoom-based interpolate per expression, so
+      // zoom must be the outer interpolate and magnitude the inner one.
+      const feedMagnitudeWidthExpr: maplibregl.ExpressionSpecification = [
+        'interpolate', ['linear'], ['zoom'],
+        8, ['interpolate', ['linear'], ['get', 'trips_norm'], 0, FEED_FREQUENCY_MIN_WIDTH, 1, FEED_FREQUENCY_MIN_WIDTH + 0.8],
+        14, ['interpolate', ['linear'], ['get', 'trips_norm'], 0, FEED_FREQUENCY_MIN_WIDTH + 0.6, 1, FEED_FREQUENCY_MAX_WIDTH],
+      ];
+      // MapLibre requires the zoom-based interpolate to be the property's
+      // top-level expression, so the casing's "+2px" offset is baked into its
+      // own copy's stops rather than wrapped around the line's expression.
+      const feedMagnitudeCasingWidthExpr: maplibregl.ExpressionSpecification = [
+        'interpolate', ['linear'], ['zoom'],
+        8, ['interpolate', ['linear'], ['get', 'trips_norm'], 0, FEED_FREQUENCY_MIN_WIDTH + 2, 1, FEED_FREQUENCY_MIN_WIDTH + 2.8],
+        14, ['interpolate', ['linear'], ['get', 'trips_norm'], 0, FEED_FREQUENCY_MIN_WIDTH + 2.6, 1, FEED_FREQUENCY_MAX_WIDTH + 2],
+      ];
+      map.addLayer({
+        id: 'analysis-frequency-casing',
+        type: 'line',
+        source: 'analysis-frequency',
+        layout: { 'line-cap': 'round', 'line-join': 'round' },
+        paint: {
+          'line-color': '#ffffff',
+          'line-width': feedMagnitudeCasingWidthExpr,
+          'line-opacity': 0.55,
+        },
+      });
+      map.addLayer({
+        id: 'analysis-frequency-line',
+        type: 'line',
+        source: 'analysis-frequency',
+        paint: {
+          'line-color': [
+            'step',
+            ['get', 'trips_norm'],
+            FEED_FREQUENCY_LOWEST_COLOR,
+            FEED_FREQUENCY_CLASS_BREAKS[0], FEED_FREQUENCY_LOW_COLOR,
+            FEED_FREQUENCY_CLASS_BREAKS[1], FEED_FREQUENCY_MID_COLOR,
+            FEED_FREQUENCY_CLASS_BREAKS[2], FEED_FREQUENCY_HIGH_COLOR,
+            FEED_FREQUENCY_CLASS_BREAKS[3], FEED_FREQUENCY_HIGHEST_COLOR,
+          ],
+          'line-width': feedMagnitudeWidthExpr,
+          'line-opacity': 0.95,
+        },
+      });
       map.addLayer({
         id: 'shapes-line-casing',
         type: 'line',
@@ -304,9 +370,26 @@ export default function MapView() {
           .catch((err) => console.warn('shape→route resolve failed', err));
       });
 
+      map.on('mouseenter', 'analysis-frequency-line', () => {
+        map.getCanvas().style.cursor = 'pointer';
+      });
+      map.on('mouseleave', 'analysis-frequency-line', () => {
+        map.getCanvas().style.cursor = '';
+      });
+      map.on('click', 'analysis-frequency-line', (evt) => {
+        const feature = evt.features?.[0];
+        if (!feature) return;
+        const activeId = useAppStore.getState().activeFeedId;
+        if (!activeId) return;
+        const routeId = String(feature.properties?.route_id ?? '');
+        if (!routeId) return;
+        const canonical = lookupRoute(activeId, routeId)?.canonicalId ?? null;
+        useAppStore.getState().setInspectorRoute({ feedId: activeId, rawId: routeId, shapeId: '', canonicalId: canonical });
+      });
+
       map.on('click', (evt) => {
         const hit = map.queryRenderedFeatures(evt.point, {
-          layers: ['stops-circle', 'shapes-line'],
+          layers: ['stops-circle', 'shapes-line', 'analysis-frequency-line'],
         });
         if (hit.length === 0) {
           clearInspector();
@@ -397,6 +480,7 @@ export default function MapView() {
         cacheRef.current.delete(key);
         dropShapeIndex(key);
         dropDiffCache(key);
+        dropFeedFrequencyCache(key);
       }
     }
     for (const key of [...pendingRef.current.keys()]) {
@@ -417,6 +501,48 @@ export default function MapView() {
     map.setFilter('shapes-line-casing', modeFilter);
     map.setFilter('shapes-line', modeFilter);
   }, [showStops, modeVisibility, ready]);
+
+  // Frequency analysis (no diff pair, so this is absolute trips/week rather
+  // than a delta) — computed for whichever feed is active, so it also tracks
+  // the timeline slider. Cached per feedId in `getOrComputeFeedFrequency`.
+  const [feedFrequency, setFeedFrequency] = useState<FeedFrequencyResult | null>(null);
+  useEffect(() => {
+    if (analysisMode !== 'frequency' || !activeFeedId) {
+      setFeedFrequency(null);
+      return;
+    }
+    let cancelled = false;
+    ensureFeedRender(activeFeedId)
+      .then((entry) => {
+        const routeIds = [...new Set([...entry.shapeToRoute.values()].flat())];
+        return getOrComputeFeedFrequency(activeFeedId, routeIds);
+      })
+      .then((r) => { if (!cancelled) setFeedFrequency(r); })
+      .catch((err) => console.warn('feed frequency compute failed', err));
+    return () => { cancelled = true; };
+  }, [analysisMode, activeFeedId, ensureFeedRender]);
+
+  // Geometry (mode-colored) and frequency are mutually exclusive overlays,
+  // same rule as the diff-mode map views — both trace the same shapes.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    const showingFrequency = analysisMode === 'frequency';
+    map.setLayoutProperty('shapes-line', 'visibility', showingFrequency ? 'none' : 'visible');
+    map.setLayoutProperty('shapes-line-casing', 'visibility', showingFrequency ? 'none' : 'visible');
+
+    if (!showingFrequency || !activeFeedId || !feedFrequency || feedFrequency.feedId !== activeFeedId) {
+      setSource(map, 'analysis-frequency', emptyFC());
+      return;
+    }
+    setSource(map, 'analysis-frequency', feedFrequencyToGeoJSON(feedFrequency));
+    setFeedFrequencySummary({
+      feedId: feedFrequency.feedId,
+      maxWeeklyTrips: feedFrequency.maxWeeklyTrips,
+      scaleWeeklyTrips: feedFrequency.scaleWeeklyTrips,
+      routeCount: feedFrequency.entries.length,
+    });
+  }, [analysisMode, activeFeedId, feedFrequency, ready, setFeedFrequencySummary]);
 
   // Basemap style + era-matched Wayback satellite, shared with the diff views.
   const basemapYear = useAppStore((s) =>
@@ -546,17 +672,21 @@ export default function MapView() {
     <>
       <div ref={containerRef} style={{ position: 'absolute', inset: 0 }} />
       <div className="map-mode-legend">
-        {MODES.map((m) => (
-          <label key={m} className={`diff-count ${modeVisibility[m] ? 'on' : 'off'}`}>
-            <input
-              type="checkbox"
-              checked={modeVisibility[m]}
-              onChange={() => toggleModeVisibility(m)}
-            />
-            <span className="diff-count-swatch" style={{ background: MODE_COLOR[m] }} />
-            <span className="diff-count-label">{MODE_LABEL[m]}</span>
-          </label>
-        ))}
+        {analysisMode === 'frequency' ? (
+          <FrequencyLegend />
+        ) : (
+          MODES.map((m) => (
+            <label key={m} className={`diff-count ${modeVisibility[m] ? 'on' : 'off'}`}>
+              <input
+                type="checkbox"
+                checked={modeVisibility[m]}
+                onChange={() => toggleModeVisibility(m)}
+              />
+              <span className="diff-count-swatch" style={{ background: MODE_COLOR[m] }} />
+              <span className="diff-count-label">{MODE_LABEL[m]}</span>
+            </label>
+          ))
+        )}
       </div>
       <MapOverlay />
       <BasemapControls />

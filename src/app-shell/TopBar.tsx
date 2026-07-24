@@ -6,6 +6,7 @@ import { exportGtfsDiffV1 } from '../diff/gtfs-diff-export';
 import { stripYearSuffix, yearOfFeed } from '../timeline/math';
 import UploadMenu from './UploadMenu';
 import FeedBar from './FeedBar';
+import { AnalysisMenu } from './AnalysisMenu';
 
 function yearedOptionLabel(f: FeedMeta): string {
   const fy = yearOfFeed(f);
@@ -141,6 +142,7 @@ export default function TopBar() {
         )}
       </div>
       <div className="topbar-right">
+        <AnalysisMenu />
         <div className="route-detail-mode-switch">
           <button
             type="button"
