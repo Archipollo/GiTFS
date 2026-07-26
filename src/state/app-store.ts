@@ -4,6 +4,7 @@ import { removeFeedFromOPFS } from '../gtfs/opfs';
 import type { StopStatus, RouteStatus } from '../diff/engine';
 import type { GeomStatus } from '../gtfs/segment-graph';
 import { yearOfFeed } from '../timeline/math';
+import type { PopulationSummary } from '../gtfs/population';
 
 export interface FeedMeta {
   id: string;
@@ -189,8 +190,18 @@ export interface AppState {
    * unreadable). Where there's no diff pair (single-feed/timeline view),
    * `'frequency'` shows each route's absolute trips/week instead.
    */
-  analysisMode: 'none' | 'frequency';
-  setAnalysisMode: (m: 'none' | 'frequency') => void;
+  analysisMode: 'none' | 'frequency' | 'population';
+  setAnalysisMode: (m: 'none' | 'frequency' | 'population') => void;
+  /**
+   * Which dataset backs the population overlay: `'ghs'` (GHS-POP global
+   * raster, default — the only source with a year-over-year series, so it's
+   * what diff mode's gained/lost overlay uses) or `'zsp'` (Statistik
+   * Austria's Zählsprengel registry counts on real boundaries — Austria-only,
+   * a single current snapshot with no per-feed-year comparison). See
+   * gtfs/zaehlsprengel.ts.
+   */
+  populationSource: 'ghs' | 'zsp';
+  setPopulationSource: (s: 'ghs' | 'zsp') => void;
   /**
    * Whether added/removed routes (100%-swing deltas, since one side is 0)
    * are included in the diff-mode frequency overlay's scale and rendering.
@@ -243,6 +254,98 @@ export interface AppState {
           maxWeeklyTrips: number;
           scaleWeeklyTrips: number;
           routeCount: number;
+        }
+      | null,
+  ) => void;
+  /**
+   * Population-overlay legend data for a diff pair — the per-cell population
+   * delta between feed A's and feed B's nearest GHS-POP year. Mirrors
+   * `diffFrequencySummary`'s "compute once on the map, read from the
+   * sidebar" split.
+   */
+  diffPopulationSummary:
+    | {
+        feedA: string;
+        feedB: string;
+        yearA: number;
+        yearB: number;
+        mode: 'delta' | 'absolute';
+        maxAbsDelta: number;
+        scaleAbsDelta: number;
+        maxPopulation: number;
+        scalePopulation: number;
+        cellCount: number;
+      }
+    | null;
+  setDiffPopulationSummary: (
+    s:
+      | {
+          feedA: string;
+          feedB: string;
+          yearA: number;
+          yearB: number;
+          mode: 'delta' | 'absolute';
+          maxAbsDelta: number;
+          scaleAbsDelta: number;
+          maxPopulation: number;
+          scalePopulation: number;
+          cellCount: number;
+        }
+      | null,
+  ) => void;
+  /**
+   * Population-overlay legend data for the no-diff-pair case: absolute
+   * population per cell for the active feed's nearest GHS-POP year.
+   */
+  feedPopulationSummary:
+    | {
+        year: number;
+        maxPopulation: number;
+        scalePopulation: number;
+        cellCount: number;
+      }
+    | null;
+  setFeedPopulationSummary: (
+    s:
+      | {
+          year: number;
+          maxPopulation: number;
+          scalePopulation: number;
+          cellCount: number;
+        }
+      | null,
+  ) => void;
+  /**
+   * Population-overlay legend data for split view's per-pane absolute GHS-POP
+   * display — unlike `diffPopulationSummary`, split view never diffs
+   * population between the two feed years (each pane shows its own year's
+   * raw numbers), so this holds one `PopulationSummary` per side instead of
+   * a single delta/absolute summary. Either side is null until that pane has
+   * finished its own compute.
+   */
+  splitPopulationSummary: { a: PopulationSummary | null; b: PopulationSummary | null };
+  setSplitPopulationSummary: (side: 'a' | 'b', summary: PopulationSummary | null) => void;
+  /**
+   * Population-overlay legend data when `populationSource === 'zsp'` — used
+   * by every view (single-feed, split, network-diff) alike, since the
+   * Zählsprengel source has no per-feed-year diff (see
+   * gtfs/zaehlsprengel.ts).
+   */
+  zaehlsprengelPopulationSummary:
+    | {
+        year: number;
+        maxPopulation: number;
+        scalePopulation: number;
+        unitCount: number;
+      }
+    | null;
+  setZaehlsprengelPopulationSummary: (
+    s:
+      | {
+          year: number;
+          maxPopulation: number;
+          scalePopulation: number;
+          unitCount: number;
         }
       | null,
   ) => void;
@@ -615,6 +718,17 @@ export const useAppStore = create<AppState>((set) => ({
   setDiffFrequencySummary: (diffFrequencySummary) => set({ diffFrequencySummary }),
   feedFrequencySummary: null,
   setFeedFrequencySummary: (feedFrequencySummary) => set({ feedFrequencySummary }),
+  populationSource: 'ghs',
+  setPopulationSource: (populationSource) => set({ populationSource }),
+  diffPopulationSummary: null,
+  setDiffPopulationSummary: (diffPopulationSummary) => set({ diffPopulationSummary }),
+  feedPopulationSummary: null,
+  setFeedPopulationSummary: (feedPopulationSummary) => set({ feedPopulationSummary }),
+  splitPopulationSummary: { a: null, b: null },
+  setSplitPopulationSummary: (side, summary) =>
+    set((s) => ({ splitPopulationSummary: { ...s.splitPopulationSummary, [side]: summary } })),
+  zaehlsprengelPopulationSummary: null,
+  setZaehlsprengelPopulationSummary: (zaehlsprengelPopulationSummary) => set({ zaehlsprengelPopulationSummary }),
   diffSegmentSummary: null,
   setDiffSegmentSummary: (diffSegmentSummary) => set({ diffSegmentSummary }),
   diffStopFocus: null,

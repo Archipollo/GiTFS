@@ -16,17 +16,28 @@ import { SEGMENT_COLOR, segmentDiffToGeoJSON, preferFeedKeepingReroutes, buildRu
 import { DIFF_COLOR, STOP_LEGEND, diffStopPoints, diffStopGhosts, diffMoveArrows } from './geojson';
 import { useDiff } from './useDiff';
 import { getOrComputeFrequencyDiff, frequencyDiffToGeoJSON, filterFrequencyDiff, type FrequencyDiffResult } from './frequency';
+import {
+  getOrComputePopulationDiff,
+  populationDiffToGeoJSON,
+  boundsOfDiffedShapes,
+  type PopulationDiffResult,
+} from './population';
+import { getOrComputeZaehlsprengelPopulation, type ZaehlsprengelResult } from '../gtfs/zaehlsprengel';
 import { FrequencyLegend } from './FrequencyLegend';
+import { PopulationLegend } from './PopulationLegend';
 import { yearOfFeed } from '../timeline/math';
 import { BasemapControls } from '../map/BasemapControls';
 import { useBasemap } from '../map/basemap';
 import { usePersistedCamera } from '../map/usePersistedCamera';
+import { useMapBounds } from '../map/useMapBounds';
 import {
   createDiffMapStyle,
   FIRST_DIFF_LAYER_ID,
   addDiffSegmentLayers,
   addDiffStopLayers,
   addDiffFrequencyLayers,
+  addDiffPopulationLayers,
+  attachPopulationTooltip,
   attachDiffSegmentClickHandler,
   attachDiffFrequencyClickHandler,
   attachDiffStopClickHandler,
@@ -62,6 +73,9 @@ export function NetworkDiffMapView({ diffedShapes }: { diffedShapes: DiffedShape
   const analysisMode = useAppStore((s) => s.analysisMode);
   const setDiffFrequencySummary = useAppStore((s) => s.setDiffFrequencySummary);
   const frequencyIncludeAddedRemoved = useAppStore((s) => s.frequencyIncludeAddedRemoved);
+  const setDiffPopulationSummary = useAppStore((s) => s.setDiffPopulationSummary);
+  const populationSource = useAppStore((s) => s.populationSource);
+  const setZaehlsprengelPopulationSummary = useAppStore((s) => s.setZaehlsprengelPopulationSummary);
   // Stop-diff shares the same cached (A,B) result the detail view already
   // computed — `useDiff` hits `peekDiff`, so this second caller adds no worker
   // work for a pair that's already been diffed.
@@ -101,6 +115,10 @@ export function NetworkDiffMapView({ diffedShapes }: { diffedShapes: DiffedShape
     const meta = diffedShapes ? s.feeds[diffedShapes.feedA] : null;
     return meta ? yearOfFeed(meta).year : null;
   });
+  const feedBYear = useAppStore((s) => {
+    const meta = diffedShapes ? s.feeds[diffedShapes.feedB] : null;
+    return meta ? yearOfFeed(meta).year : null;
+  });
   useBasemap(mapRef, ready, diffBasemapYear ?? feedAYear, FIRST_DIFF_LAYER_ID);
 
   useEffect(() => {
@@ -115,6 +133,10 @@ export function NetworkDiffMapView({ diffedShapes }: { diffedShapes: DiffedShape
     });
     map.addControl(new maplibregl.NavigationControl(), 'top-right');
     map.on('load', () => {
+      // Added first so the fill sits at the very bottom of the diff stack,
+      // under the segment/stop layers added below.
+      addDiffPopulationLayers(map);
+      attachPopulationTooltip(map, 'diff-population-fill');
       addDiffSegmentLayers(map);
       // Network overview: labels only once the user zooms into an area.
       addDiffStopLayers(map, { labelMinZoom: 12 });
@@ -200,6 +222,82 @@ export function NetworkDiffMapView({ diffedShapes }: { diffedShapes: DiffedShape
       routeCount: filtered.entries.length,
     });
   }, [frequency, analysisMode, ready, frequencyIncludeAddedRemoved, setDiffFrequencySummary]);
+
+  // Population-diff overlay — a fill layer, so unlike frequency it doesn't
+  // need to empty `diff-segments`; routes/stops stay visible on top of it.
+  // Scoped to whatever bbox the map currently shows.
+  const populationBounds = useMapBounds(mapRef, ready);
+  const [population, setPopulation] = useState<PopulationDiffResult | null>(null);
+  useEffect(() => {
+    if (
+      analysisMode !== 'population' ||
+      populationSource !== 'ghs' ||
+      !diffedShapes ||
+      feedAYear == null ||
+      feedBYear == null ||
+      !populationBounds
+    ) {
+      setPopulation(null);
+      return;
+    }
+    let cancelled = false;
+    const scaleBbox = boundsOfDiffedShapes(diffedShapes) ?? populationBounds;
+    getOrComputePopulationDiff(diffedShapes.feedA, diffedShapes.feedB, feedAYear, feedBYear, populationBounds, scaleBbox)
+      .then((r) => { if (!cancelled) setPopulation(r); })
+      .catch((err) => console.warn('network population compute failed', err));
+    return () => { cancelled = true; };
+  }, [analysisMode, populationSource, diffedShapes, feedAYear, feedBYear, populationBounds]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    if (!population || analysisMode !== 'population' || populationSource !== 'ghs') {
+      setDiffPopulationSummary(null);
+      setSource(map, 'diff-population', emptyFC());
+      return;
+    }
+    setSource(map, 'diff-population', populationDiffToGeoJSON(population));
+    setDiffPopulationSummary({
+      feedA: population.feedA,
+      feedB: population.feedB,
+      yearA: population.yearA,
+      yearB: population.yearB,
+      mode: population.mode,
+      maxAbsDelta: population.maxAbsDelta,
+      scaleAbsDelta: population.scaleAbsDelta,
+      maxPopulation: population.maxPopulation,
+      scalePopulation: population.scalePopulation,
+      cellCount: population.cellCount,
+    });
+  }, [population, analysisMode, populationSource, ready, setDiffPopulationSummary]);
+
+  // Zählsprengel source — same 'diff-population' fill layer, no per-feed-year
+  // diff (see gtfs/zaehlsprengel.ts): just the current registry snapshot.
+  const [zaehlsprengelPopulation, setZaehlsprengelPopulation] = useState<ZaehlsprengelResult | null>(null);
+  useEffect(() => {
+    if (analysisMode !== 'population' || populationSource !== 'zsp' || !diffedShapes || !populationBounds) {
+      setZaehlsprengelPopulation(null);
+      return;
+    }
+    let cancelled = false;
+    const scaleBbox = boundsOfDiffedShapes(diffedShapes) ?? populationBounds;
+    getOrComputeZaehlsprengelPopulation(populationBounds, scaleBbox)
+      .then((r) => { if (!cancelled) setZaehlsprengelPopulation(r); })
+      .catch((err) => console.warn('zählsprengel population fetch failed', err));
+    return () => { cancelled = true; };
+  }, [analysisMode, populationSource, diffedShapes, populationBounds]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    if (!zaehlsprengelPopulation || analysisMode !== 'population' || populationSource !== 'zsp') {
+      setZaehlsprengelPopulationSummary(null);
+      setSource(map, 'diff-population', emptyFC());
+      return;
+    }
+    setSource(map, 'diff-population', zaehlsprengelPopulation.geojson);
+    setZaehlsprengelPopulationSummary(zaehlsprengelPopulation.summary);
+  }, [zaehlsprengelPopulation, analysisMode, populationSource, ready, setZaehlsprengelPopulationSummary]);
 
   // Stop-diff dots for the whole network. Unlike RouteDetailView these aren't
   // filtered to a single route — every changed stop is shown. `unchanged` is
@@ -303,19 +401,23 @@ export function NetworkDiffMapView({ diffedShapes }: { diffedShapes: DiffedShape
         <div ref={containerRef} className="network-diff-map-canvas" />
         <BasemapControls />
         <div className="map-mode-legend">
-          {analysisMode === 'frequency'
-            ? <FrequencyLegend />
-            : legendItems.map(({ id, label }) => (
-                <label key={id} className={`diff-count ${diffSegmentVisibility[id] ? 'on' : 'off'}`}>
-                  <input
-                    type="checkbox"
-                    checked={diffSegmentVisibility[id]}
-                    onChange={() => toggleDiffSegmentVisibility(id)}
-                  />
-                  <span className="diff-count-swatch diff-count-swatch--line" style={{ background: SEGMENT_COLOR[id] }} />
-                  <span className="diff-count-label">{label}</span>
-                </label>
-              ))}
+          {analysisMode === 'frequency' ? (
+            <FrequencyLegend />
+          ) : analysisMode === 'population' ? (
+            <PopulationLegend />
+          ) : (
+            legendItems.map(({ id, label }) => (
+              <label key={id} className={`diff-count ${diffSegmentVisibility[id] ? 'on' : 'off'}`}>
+                <input
+                  type="checkbox"
+                  checked={diffSegmentVisibility[id]}
+                  onChange={() => toggleDiffSegmentVisibility(id)}
+                />
+                <span className="diff-count-swatch diff-count-swatch--line" style={{ background: SEGMENT_COLOR[id] }} />
+                <span className="diff-count-label">{label}</span>
+              </label>
+            ))
+          )}
           {analysisMode !== 'frequency' && STOP_LEGEND.map(({ id, label }) => (
             <label key={id} className={`diff-count ${diffStopVisibility[id] ? 'on' : 'off'}`}>
               <input

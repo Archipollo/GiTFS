@@ -1,21 +1,30 @@
 // Global analysis toolbox: a single popover menu (same shell as UploadMenu /
 // FeedBar) that lets the user switch on an analysis overlay from any view —
 // network overview, split view, route detail, or plain single-feed/timeline
-// browsing. Today: Frequency (trips/week, delta when a diff pair is loaded,
-// absolute otherwise). Future modes (e.g. population density) are additional
-// rows in the same popover, keyed off the same `analysisMode` store field.
+// browsing. Frequency (trips/week, delta when a diff pair is loaded, absolute
+// otherwise) and Population (people per cell from GHS-POP, delta in diff
+// mode) are both additional rows in the same popover, keyed off the same
+// `analysisMode` store field.
 
 import { useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../state/app-store';
 
-const MODE_LABEL: Record<'none' | 'frequency', string> = {
+const MODE_LABEL: Record<'none' | 'frequency' | 'population', string> = {
   none: 'None',
   frequency: 'Frequency',
+  population: 'Population',
+};
+
+const POPULATION_SOURCE_LABEL: Record<'ghs' | 'zsp', string> = {
+  ghs: 'GHS-POP',
+  zsp: 'Zählsprengel',
 };
 
 export function AnalysisMenu() {
   const analysisMode = useAppStore((s) => s.analysisMode);
   const setAnalysisMode = useAppStore((s) => s.setAnalysisMode);
+  const populationSource = useAppStore((s) => s.populationSource);
+  const setPopulationSource = useAppStore((s) => s.setPopulationSource);
   const [open, setOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -50,7 +59,7 @@ export function AnalysisMenu() {
       {open && (
         <div className="upload-menu-popover" role="menu">
           <div className="route-detail-mode-switch">
-            {(['none', 'frequency'] as const).map((mode) => (
+            {(['none', 'frequency', 'population'] as const).map((mode) => (
               <button
                 key={mode}
                 type="button"
@@ -61,10 +70,28 @@ export function AnalysisMenu() {
               </button>
             ))}
           </div>
+          {analysisMode === 'population' && (
+            <div className="route-detail-mode-switch">
+              {(['ghs', 'zsp'] as const).map((source) => (
+                <button
+                  key={source}
+                  type="button"
+                  className={populationSource === source ? 'on' : 'off'}
+                  onClick={() => setPopulationSource(source)}
+                >
+                  {POPULATION_SOURCE_LABEL[source]}
+                </button>
+              ))}
+            </div>
+          )}
           <div className="upload-menu-hint muted">
             {analysisMode === 'frequency'
               ? 'Lines colored by trips/week — gained or lost, when comparing two feeds.'
-              : 'Pick an analysis overlay to apply across every view.'}
+              : analysisMode === 'population'
+                ? populationSource === 'ghs'
+                  ? 'Cells colored by people per ~100m cell (GHS-POP) — gained or lost, when comparing two feeds.'
+                  : 'Zählsprengel colored by current Statistik Austria registry population — a single snapshot, not tied to feed year.'
+                : 'Pick an analysis overlay to apply across every view.'}
           </div>
         </div>
       )}

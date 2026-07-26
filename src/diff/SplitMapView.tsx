@@ -15,17 +15,24 @@ import { SEGMENT_COLOR, segmentDiffToGeoJSON, preferFeed, buildRunLineStatus } f
 import { DIFF_COLOR, STOP_LEGEND, diffStopPointsForFeed } from './geojson';
 import { useDiff } from './useDiff';
 import { getOrComputeFrequencyDiff, frequencyDiffToGeoJSON, filterFrequencyDiff, type FrequencyDiffResult } from './frequency';
+import { computeFeedPopulation, feedPopulationToGeoJSON, type FeedPopulationResult, type Bbox } from '../gtfs/population';
+import { boundsOfDiffedShapes } from './population';
+import { getOrComputeZaehlsprengelPopulation, type ZaehlsprengelResult } from '../gtfs/zaehlsprengel';
 import { FrequencyLegend } from './FrequencyLegend';
+import { PopulationLegend } from './PopulationLegend';
 import { yearOfFeed } from '../timeline/math';
 import { BasemapControls } from '../map/BasemapControls';
 import { useBasemap } from '../map/basemap';
 import { usePersistedCamera } from '../map/usePersistedCamera';
+import { useMapBounds } from '../map/useMapBounds';
 import {
   createDiffMapStyle,
   FIRST_DIFF_LAYER_ID,
   addDiffSegmentLayers,
   addDiffStopLayers,
   addDiffFrequencyLayers,
+  addDiffPopulationLayers,
+  attachPopulationTooltip,
   attachDiffSegmentClickHandler,
   attachDiffFrequencyClickHandler,
   attachDiffStopClickHandler,
@@ -73,6 +80,9 @@ function MapPane({ side, diffedShapes, otherMapRef, syncingRef, onReady }: PaneP
   const analysisMode = useAppStore((s) => s.analysisMode);
   const setDiffFrequencySummary = useAppStore((s) => s.setDiffFrequencySummary);
   const frequencyIncludeAddedRemoved = useAppStore((s) => s.frequencyIncludeAddedRemoved);
+  const setSplitPopulationSummary = useAppStore((s) => s.setSplitPopulationSummary);
+  const populationSource = useAppStore((s) => s.populationSource);
+  const setZaehlsprengelPopulationSummary = useAppStore((s) => s.setZaehlsprengelPopulationSummary);
   // Both panes read the same cached (A,B) diff — `useDiff` hits `peekDiff`, so
   // the second pane adds no worker work for an already-diffed pair.
   const diffStatus = useDiff(activeFeedId, compareFeedId);
@@ -129,6 +139,10 @@ function MapPane({ side, diffedShapes, otherMapRef, syncingRef, onReady }: PaneP
     });
     map.addControl(new maplibregl.NavigationControl(), 'top-right');
     map.on('load', () => {
+      // Added first so the fill sits at the very bottom of the diff stack,
+      // under the segment/stop layers added below.
+      addDiffPopulationLayers(map);
+      attachPopulationTooltip(map, 'diff-population-fill');
       addDiffSegmentLayers(map);
       // Split panes are network-scale like the overview: gate labels to z12+.
       addDiffStopLayers(map, { labelMinZoom: 12 });
@@ -268,6 +282,67 @@ function MapPane({ side, diffedShapes, otherMapRef, syncingRef, onReady }: PaneP
     }
   }, [frequency, analysisMode, ready, side, frequencyIncludeAddedRemoved, setDiffFrequencySummary]);
 
+  // Population overlay — absolute, per pane. Unlike frequency/geometry, split
+  // view deliberately does *not* diff population between the two feed years:
+  // each pane shows its own year's raw GHS-POP density, so the left/right
+  // panes read as "before" and "after" numbers side by side rather than a
+  // single gained/lost overlay (that cross-feed diff is what the network
+  // overview's map already shows).
+  const populationBounds = useMapBounds(mapRef, ready);
+  const [population, setPopulation] = useState<FeedPopulationResult | null>(null);
+  useEffect(() => {
+    if (analysisMode !== 'population' || populationSource !== 'ghs' || paneYear == null || !populationBounds) {
+      setPopulation(null);
+      return;
+    }
+    let cancelled = false;
+    const scaleBbox: Bbox = (diffedShapes && boundsOfDiffedShapes(diffedShapes)) || populationBounds;
+    computeFeedPopulation(paneYear, populationBounds, scaleBbox)
+      .then((r) => { if (!cancelled) setPopulation(r); })
+      .catch((err) => console.warn('split population compute failed', err));
+    return () => { cancelled = true; };
+  }, [analysisMode, populationSource, paneYear, populationBounds, diffedShapes]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    if (!population || analysisMode !== 'population' || populationSource !== 'ghs') {
+      setSplitPopulationSummary(side === 'old' ? 'a' : 'b', null);
+      setSource(map, 'diff-population', emptyFC());
+      return;
+    }
+    setSource(map, 'diff-population', feedPopulationToGeoJSON(population));
+    setSplitPopulationSummary(side === 'old' ? 'a' : 'b', population.summary);
+  }, [population, analysisMode, populationSource, ready, side, setSplitPopulationSummary]);
+
+  // Zählsprengel source — same 'diff-population' fill layer on both panes, no
+  // per-feed-year diff (see gtfs/zaehlsprengel.ts): current registry snapshot.
+  const [zaehlsprengelPopulation, setZaehlsprengelPopulation] = useState<ZaehlsprengelResult | null>(null);
+  useEffect(() => {
+    if (analysisMode !== 'population' || populationSource !== 'zsp' || !populationBounds) {
+      setZaehlsprengelPopulation(null);
+      return;
+    }
+    let cancelled = false;
+    const scaleBbox: Bbox = (diffedShapes && boundsOfDiffedShapes(diffedShapes)) || populationBounds;
+    getOrComputeZaehlsprengelPopulation(populationBounds, scaleBbox)
+      .then((r) => { if (!cancelled) setZaehlsprengelPopulation(r); })
+      .catch((err) => console.warn('zählsprengel population fetch failed', err));
+    return () => { cancelled = true; };
+  }, [analysisMode, populationSource, populationBounds, diffedShapes]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    if (!zaehlsprengelPopulation || analysisMode !== 'population' || populationSource !== 'zsp') {
+      setZaehlsprengelPopulationSummary(null);
+      setSource(map, 'diff-population', emptyFC());
+      return;
+    }
+    setSource(map, 'diff-population', zaehlsprengelPopulation.geojson);
+    if (side === 'old') setZaehlsprengelPopulationSummary(zaehlsprengelPopulation.summary);
+  }, [zaehlsprengelPopulation, analysisMode, populationSource, ready, side, setZaehlsprengelPopulationSummary]);
+
   // This pane's own stops, at this feed's positions. Ghost/arrow layers stay
   // empty here — displacement is shown by the moved stop appearing on both
   // panes, so the single-map ghost+arrow treatment isn't needed.
@@ -402,19 +477,23 @@ export function SplitMapView({ diffedShapes }: { diffedShapes: DiffedShapes | nu
         />
         <BasemapControls />
         <div className="map-mode-legend">
-          {analysisMode === 'frequency'
-            ? <FrequencyLegend />
-            : legendItems.map(({ id, label }) => (
-                <label key={id} className={`diff-count ${diffSegmentVisibility[id] ? 'on' : 'off'}`}>
-                  <input
-                    type="checkbox"
-                    checked={diffSegmentVisibility[id]}
-                    onChange={() => toggleDiffSegmentVisibility(id)}
-                  />
-                  <span className="diff-count-swatch diff-count-swatch--line" style={{ background: SEGMENT_COLOR[id] }} />
-                  <span className="diff-count-label">{label}</span>
-                </label>
-              ))}
+          {analysisMode === 'frequency' ? (
+            <FrequencyLegend />
+          ) : analysisMode === 'population' ? (
+            <PopulationLegend />
+          ) : (
+            legendItems.map(({ id, label }) => (
+              <label key={id} className={`diff-count ${diffSegmentVisibility[id] ? 'on' : 'off'}`}>
+                <input
+                  type="checkbox"
+                  checked={diffSegmentVisibility[id]}
+                  onChange={() => toggleDiffSegmentVisibility(id)}
+                />
+                <span className="diff-count-swatch diff-count-swatch--line" style={{ background: SEGMENT_COLOR[id] }} />
+                <span className="diff-count-label">{label}</span>
+              </label>
+            ))
+          )}
           {analysisMode !== 'frequency' && STOP_LEGEND.map(({ id, label }) => (
             <label key={id} className={`diff-count ${diffStopVisibility[id] ? 'on' : 'off'}`}>
               <input

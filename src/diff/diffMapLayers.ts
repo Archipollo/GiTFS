@@ -18,6 +18,24 @@ import {
   FREQUENCY_BIG_GAIN_COLOR,
   FREQUENCY_CLASS_BREAKS,
 } from './frequency';
+import {
+  POPULATION_BIG_LOSS_COLOR,
+  POPULATION_SMALL_LOSS_COLOR,
+  POPULATION_NEUTRAL_COLOR,
+  POPULATION_SMALL_GAIN_COLOR,
+  POPULATION_BIG_GAIN_COLOR,
+  POPULATION_DIFF_CLASS_BREAKS,
+  POPULATION_DIFF_FILL_OPACITY,
+} from './population';
+import {
+  POPULATION_LOWEST_COLOR,
+  POPULATION_LOW_COLOR,
+  POPULATION_MID_COLOR,
+  POPULATION_HIGH_COLOR,
+  POPULATION_HIGHEST_COLOR,
+  POPULATION_CLASS_BREAKS,
+  POPULATION_FILL_OPACITY,
+} from '../gtfs/population';
 
 /** First layer added by `addDiffSegmentLayers` — the anchor a dynamically
  * inserted basemap (historical satellite) must slot in *below*. This is the
@@ -810,5 +828,112 @@ export function addDiffFrequencyLayers(map: MapLibreMap): void {
       'line-width': magnitudeWidthExpr,
       'line-opacity': 0.95,
     },
+  });
+}
+
+/**
+ * Population-diff overlay: a single fill layer, per-cell population change.
+ * Callers must add this *before* `addDiffSegmentLayers`/`addDiffStopLayers`
+ * (not after, unlike the frequency overlay) so the fill sits at the very
+ * bottom of the diff stack — underneath the basemap-anchored segment/stop
+ * layers — letting routes and stations render on top of the choropleth
+ * instead of being obscured by it.
+ *
+ * Feeds features in two shapes depending on `PopulationDiffResult.mode`
+ * (see population.ts): `pop_delta` (diverging loss/gain, fixed absolute
+ * breaks) when feed A and B resolve to different GHS-POP years, or `pop_norm`
+ * (sequential density — more people, darker fill) when they share a year and
+ * a delta would be all zeros. Both properties never co-occur on the same
+ * feature, so `has` picks
+ * the ramp per-feature (in practice uniform across a whole render, since one
+ * `PopulationDiffResult` is all one mode).
+ */
+export function addDiffPopulationLayers(map: MapLibreMap): void {
+  map.addSource('diff-population', { type: 'geojson', data: emptyFC() });
+  map.addLayer({
+    id: 'diff-population-fill',
+    type: 'fill',
+    source: 'diff-population',
+    paint: {
+      'fill-color': [
+        'case',
+        ['has', 'pop_norm'],
+        [
+          'step', ['get', 'pop_norm'],
+          POPULATION_LOWEST_COLOR,
+          POPULATION_CLASS_BREAKS[0], POPULATION_LOW_COLOR,
+          POPULATION_CLASS_BREAKS[1], POPULATION_MID_COLOR,
+          POPULATION_CLASS_BREAKS[2], POPULATION_HIGH_COLOR,
+          POPULATION_CLASS_BREAKS[3], POPULATION_HIGHEST_COLOR,
+        ],
+        [
+          'step', ['get', 'pop_delta'],
+          POPULATION_BIG_LOSS_COLOR,
+          POPULATION_DIFF_CLASS_BREAKS[0], POPULATION_SMALL_LOSS_COLOR,
+          POPULATION_DIFF_CLASS_BREAKS[1], POPULATION_NEUTRAL_COLOR,
+          POPULATION_DIFF_CLASS_BREAKS[2], POPULATION_SMALL_GAIN_COLOR,
+          POPULATION_DIFF_CLASS_BREAKS[3], POPULATION_BIG_GAIN_COLOR,
+        ],
+      ],
+      'fill-opacity': ['case', ['has', 'pop_norm'], POPULATION_FILL_OPACITY, POPULATION_DIFF_FILL_OPACITY],
+    },
+  });
+}
+
+function fmtPop(n: number): string {
+  return Math.round(n).toLocaleString();
+}
+
+/** Dwell time before the population tooltip appears — long enough that
+ * sweeping the cursor across the choropleth while just looking at the
+ * colours doesn't paper the map in popups; only pausing over a cell for a
+ * couple seconds surfaces its numbers. */
+const POPULATION_TOOLTIP_DELAY_MS = 2000;
+
+function populationTooltipHtml(props: Record<string, unknown>): string | null {
+  const { pop_delta: delta, population_a: a, population_b: b, population } = props;
+  if (typeof delta === 'number') {
+    const sign = delta > 0 ? '+' : '';
+    const changeLine = `Change: ${sign}${fmtPop(delta)}`;
+    const absLine = typeof a === 'number' && typeof b === 'number' ? `${fmtPop(a)} → ${fmtPop(b)} people` : '';
+    return `<div>${absLine}</div><div>${changeLine}</div>`;
+  }
+  if (typeof population === 'number') return `<div>${fmtPop(population)} people</div>`;
+  return null;
+}
+
+/**
+ * Hover tooltip for a population fill layer: shows the cell's absolute
+ * population, plus (in network-diff delta mode, where `population_a`/
+ * `population_b` are set — see `populationDiffToGeoJSON`) the before/after
+ * numbers and the change between them. Shared by the single-feed map's
+ * `analysis-population-fill` layer and the diff views' `diff-population-fill`.
+ *
+ * Appears only after the cursor settles on a cell for
+ * `POPULATION_TOOLTIP_DELAY_MS` — every `mousemove` restarts the timer, so
+ * sweeping across the choropleth doesn't spawn a popup per cell crossed.
+ */
+export function attachPopulationTooltip(map: MapLibreMap, layerId: string): void {
+  const popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 8 });
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  const clearTimer = () => {
+    if (timer !== null) { clearTimeout(timer); timer = null; }
+  };
+
+  map.on('mousemove', layerId, (evt) => {
+    clearTimer();
+    popup.remove();
+    const props = evt.features?.[0]?.properties;
+    if (!props) return;
+    const lngLat = evt.lngLat;
+    timer = setTimeout(() => {
+      const html = populationTooltipHtml(props);
+      if (html) popup.setLngLat(lngLat).setHTML(html).addTo(map);
+    }, POPULATION_TOOLTIP_DELAY_MS);
+  });
+  map.on('mouseleave', layerId, () => {
+    clearTimer();
+    popup.remove();
   });
 }

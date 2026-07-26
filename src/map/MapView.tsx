@@ -30,9 +30,26 @@ import {
   type FeedFrequencyResult,
 } from '../gtfs/frequency';
 import { FrequencyLegend } from '../diff/FrequencyLegend';
+import { PopulationLegend } from '../diff/PopulationLegend';
+import {
+  computeFeedPopulation,
+  feedPopulationToGeoJSON,
+  POPULATION_LOWEST_COLOR,
+  POPULATION_LOW_COLOR,
+  POPULATION_MID_COLOR,
+  POPULATION_HIGH_COLOR,
+  POPULATION_HIGHEST_COLOR,
+  POPULATION_CLASS_BREAKS,
+  POPULATION_FILL_OPACITY,
+  type FeedPopulationResult,
+  type Bbox,
+} from '../gtfs/population';
+import { getOrComputeZaehlsprengelPopulation, type ZaehlsprengelResult } from '../gtfs/zaehlsprengel';
+import { attachPopulationTooltip } from '../diff/diffMapLayers';
 import MapOverlay from './MapOverlay';
 import { BasemapControls } from './BasemapControls';
 import { basemapLayers, basemapSources, useBasemap } from './basemap';
+import { useMapBounds } from './useMapBounds';
 import { useRegistry } from '../registry/useRegistry';
 import { lookupStop, lookupRoute } from '../registry/registry';
 import { dropDiffCache, dropShapeIndex } from '../gtfs/segment-graph';
@@ -92,6 +109,9 @@ export default function MapView() {
   const pinnedEntities = useAppStore((s) => s.pinnedEntities);
   const analysisMode = useAppStore((s) => s.analysisMode);
   const setFeedFrequencySummary = useAppStore((s) => s.setFeedFrequencySummary);
+  const setFeedPopulationSummary = useAppStore((s) => s.setFeedPopulationSummary);
+  const populationSource = useAppStore((s) => s.populationSource);
+  const setZaehlsprengelPopulationSummary = useAppStore((s) => s.setZaehlsprengelPopulationSummary);
 
   // Prebuilt-GeoJSON cache keyed by feedId. Populated lazily on first view of
   // a feed and proactively by the background prefetcher. Once a feed is here,
@@ -154,6 +174,27 @@ export default function MapView() {
       map.addSource('inspector-stop', { type: 'geojson', data: emptyFC() });
       map.addSource('inspector-shape', { type: 'geojson', data: emptyFC() });
       map.addSource('analysis-frequency', { type: 'geojson', data: emptyFC() });
+      map.addSource('analysis-population', { type: 'geojson', data: emptyFC() });
+      // Fill layer added before every line/circle layer below so the
+      // population choropleth sits under routes and stops, not over them.
+      map.addLayer({
+        id: 'analysis-population-fill',
+        type: 'fill',
+        source: 'analysis-population',
+        paint: {
+          'fill-color': [
+            'step',
+            ['get', 'pop_norm'],
+            POPULATION_LOWEST_COLOR,
+            POPULATION_CLASS_BREAKS[0], POPULATION_LOW_COLOR,
+            POPULATION_CLASS_BREAKS[1], POPULATION_MID_COLOR,
+            POPULATION_CLASS_BREAKS[2], POPULATION_HIGH_COLOR,
+            POPULATION_CLASS_BREAKS[3], POPULATION_HIGHEST_COLOR,
+          ],
+          'fill-opacity': POPULATION_FILL_OPACITY,
+        },
+      });
+      attachPopulationTooltip(map, 'analysis-population-fill');
       // Width encodes trips/week (not just zoom): a low-frequency route stays
       // near the thin end at any zoom, a high-frequency one renders near the
       // thick end — same "magnitude in the line itself" treatment as the
@@ -544,6 +585,81 @@ export default function MapView() {
     });
   }, [analysisMode, activeFeedId, feedFrequency, ready, setFeedFrequencySummary]);
 
+  // Population analysis — a fill layer under the routes/stops, so unlike
+  // frequency it coexists with the normal geometry (no visibility toggling
+  // needed here). Scoped to whatever bbox the map currently shows.
+  const populationBounds = useMapBounds(mapRef, ready);
+  const [feedPopulation, setFeedPopulation] = useState<FeedPopulationResult | null>(null);
+  useEffect(() => {
+    if (analysisMode !== 'population' || populationSource !== 'ghs' || !activeFeedId || !populationBounds) {
+      setFeedPopulation(null);
+      return;
+    }
+    const feed = useAppStore.getState().feeds[activeFeedId];
+    if (!feed) { setFeedPopulation(null); return; }
+    let cancelled = false;
+    ensureFeedRender(activeFeedId).then((entry) => {
+      if (cancelled) return;
+      // The feed's full stops extent, not the current viewport — see the
+      // `scaleBbox` comment in gtfs/population.ts. Falls back to the
+      // viewport itself for a (stopless) feed with no computable bounds.
+      const scaleBbox: Bbox = entry.bounds ? bboxFromBounds(entry.bounds) : populationBounds;
+      return computeFeedPopulation(yearOfFeed(feed).year, populationBounds, scaleBbox);
+    })
+      .then((r) => { if (!cancelled && r) setFeedPopulation(r); })
+      .catch((err) => console.warn('feed population compute failed', err));
+    return () => { cancelled = true; };
+  }, [analysisMode, populationSource, activeFeedId, populationBounds, ensureFeedRender]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    if (analysisMode !== 'population' || populationSource !== 'ghs' || !feedPopulation) {
+      setFeedPopulationSummary(null);
+      setSource(map, 'analysis-population', emptyFC());
+      return;
+    }
+    setSource(map, 'analysis-population', feedPopulationToGeoJSON(feedPopulation));
+    setFeedPopulationSummary({
+      year: feedPopulation.summary.year,
+      maxPopulation: feedPopulation.summary.maxPopulation,
+      scalePopulation: feedPopulation.summary.scalePopulation,
+      cellCount: feedPopulation.summary.cellCount,
+    });
+  }, [analysisMode, populationSource, feedPopulation, ready, setFeedPopulationSummary]);
+
+  // Zählsprengel source: same fill layer/source as GHS-POP (both key off
+  // `pop_norm`), just a different data provider and no feed-year dependency
+  // — see gtfs/zaehlsprengel.ts.
+  const [zaehlsprengelPopulation, setZaehlsprengelPopulation] = useState<ZaehlsprengelResult | null>(null);
+  useEffect(() => {
+    if (analysisMode !== 'population' || populationSource !== 'zsp' || !activeFeedId || !populationBounds) {
+      setZaehlsprengelPopulation(null);
+      return;
+    }
+    let cancelled = false;
+    ensureFeedRender(activeFeedId).then((entry) => {
+      if (cancelled) return;
+      const scaleBbox: Bbox = entry.bounds ? bboxFromBounds(entry.bounds) : populationBounds;
+      return getOrComputeZaehlsprengelPopulation(populationBounds, scaleBbox);
+    })
+      .then((r) => { if (!cancelled && r) setZaehlsprengelPopulation(r); })
+      .catch((err) => console.warn('zählsprengel population fetch failed', err));
+    return () => { cancelled = true; };
+  }, [analysisMode, populationSource, activeFeedId, populationBounds, ensureFeedRender]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    if (analysisMode !== 'population' || populationSource !== 'zsp' || !zaehlsprengelPopulation) {
+      setZaehlsprengelPopulationSummary(null);
+      setSource(map, 'analysis-population', emptyFC());
+      return;
+    }
+    setSource(map, 'analysis-population', zaehlsprengelPopulation.geojson);
+    setZaehlsprengelPopulationSummary(zaehlsprengelPopulation.summary);
+  }, [analysisMode, populationSource, zaehlsprengelPopulation, ready, setZaehlsprengelPopulationSummary]);
+
   // Basemap style + era-matched Wayback satellite, shared with the diff views.
   const basemapYear = useAppStore((s) =>
     s.activeFeedId && s.feeds[s.activeFeedId] ? yearOfFeed(s.feeds[s.activeFeedId]).year : null,
@@ -674,6 +790,8 @@ export default function MapView() {
       <div className="map-mode-legend">
         {analysisMode === 'frequency' ? (
           <FrequencyLegend />
+        ) : analysisMode === 'population' ? (
+          <PopulationLegend />
         ) : (
           MODES.map((m) => (
             <label key={m} className={`diff-count ${modeVisibility[m] ? 'on' : 'off'}`}>
@@ -763,6 +881,14 @@ function shapesToGeoJSON(shapes: ShapePolyline[]): GeoJSON.FeatureCollection {
       },
     })),
   };
+}
+
+/** `boundsOfStops`/`ensureFeedRender`'s `entry.bounds` is always this concrete
+ * SW/NE-corner shape (never another `LngLatBoundsLike` variant), so this
+ * narrows it back to a flat `Bbox` for the population-scale callers. */
+function bboxFromBounds(bounds: maplibregl.LngLatBoundsLike): Bbox {
+  const b = bounds as [[number, number], [number, number]];
+  return [b[0][0], b[0][1], b[1][0], b[1][1]];
 }
 
 function boundsOfStops(stops: { lat: number; lon: number }[]): maplibregl.LngLatBoundsLike {
