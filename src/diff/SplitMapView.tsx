@@ -10,10 +10,11 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import maplibregl, { Map as MapLibreMap } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { useAppStore } from '../state/app-store';
-import type { DiffedShapes, GeomStatus } from '../gtfs/segment-graph';
+import type { DiffedRun, DiffedShapes, GeomStatus } from '../gtfs/segment-graph';
 import { SEGMENT_COLOR, segmentDiffToGeoJSON, preferFeed, buildRunLineStatus } from '../gtfs/segment-graph';
-import { DIFF_COLOR, STOP_LEGEND, diffStopPointsForFeed } from './geojson';
+import { DIFF_COLOR, STOP_LEGEND, diffStopPointsForFeed, filterStopsByRouteMembership } from './geojson';
 import { useDiff } from './useDiff';
+import { useLineDirections } from './useLineDirections';
 import { getOrComputeFrequencyDiff, frequencyDiffToGeoJSON, filterFrequencyDiff, type FrequencyDiffResult } from './frequency';
 import { computeFeedPopulation, feedPopulationToGeoJSON, type FeedPopulationResult, type Bbox } from '../gtfs/population';
 import { boundsOfDiffedShapes } from './population';
@@ -39,6 +40,7 @@ import {
   setDiffRouteHighlight,
   setDiffStopHighlight,
   boundsOfLineFeatures,
+  filterFeaturesNearRoute,
   emptyFC,
   setSource,
   ALL_SEGMENT_STATUSES_VISIBLE,
@@ -47,6 +49,7 @@ import {
 
 const INITIAL_CENTER: [number, number] = [14.55, 47.6];
 const INITIAL_ZOOM = 6.5;
+const STOP_ROUTE_TOL_M = 60;
 
 /** Which side ('old' | 'new') shows each geometry status. `unchanged` shows
  * on both — it's the shared network backdrop for orientation. */
@@ -55,15 +58,35 @@ const SIDE_STATUS: Record<'old' | 'new', GeomStatus[]> = {
   new: ['unchanged', 'added'],
 };
 
+/** Narrows a side's `preferFeed` accept predicate to a single focused
+ * line (+ optional direction) — the same "isolate one route" filter
+ * `RouteDetailView` applies, so a focused line in split layout shows just
+ * its own old/new shapes instead of the whole network. */
+function withRouteFocus(
+  base: (r: DiffedRun) => boolean,
+  routeFocus: string | null,
+  directionFocus: number | null,
+): (r: DiffedRun) => boolean {
+  if (!routeFocus) return base;
+  return (r) =>
+    base(r) &&
+    r.canonicalId === routeFocus &&
+    (directionFocus == null || r.direction_id === directionFocus);
+}
+
 interface PaneProps {
   side: 'old' | 'new';
   diffedShapes: DiffedShapes | null;
   otherMapRef: { current: MapLibreMap | null };
   syncingRef: { current: boolean };
   onReady: (map: MapLibreMap) => void;
+  /** Real `stop_id`s the focused route+direction visits per feed, used to
+   * scope the stop overlay the same way `RouteDetailView` does; `null` when
+   * no line is focused (no stop scoping applied). */
+  routeStopIds: { a: Set<string>; b: Set<string> } | null;
 }
 
-function MapPane({ side, diffedShapes, otherMapRef, syncingRef, onReady }: PaneProps) {
+function MapPane({ side, diffedShapes, otherMapRef, syncingRef, onReady, routeStopIds }: PaneProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
   const [ready, setReady] = useState(false);
@@ -192,11 +215,12 @@ function MapPane({ side, diffedShapes, otherMapRef, syncingRef, onReady }: PaneP
     const allowed = new Set(SIDE_STATUS[side]);
     // Each pane draws one feed's own network, so it takes that feed's copy of
     // the shared corridors — the 'new' pane taking the A-side copy would leave
-    // its reroutes ending just short of the grey they continue into.
+    // its reroutes ending just short of the grey they continue into. A
+    // focused line further narrows this to just that route (+ direction).
     const { features } = segmentDiffToGeoJSON(
       diffedShapes,
       diffSegmentVisibility,
-      preferFeed(side === 'old' ? 'a' : 'b'),
+      withRouteFocus(preferFeed(side === 'old' ? 'a' : 'b'), diffRouteFocus, diffDirectionFocus),
       runLineStatus,
     );
     // Further restrict to this pane's side on top of the shared
@@ -227,7 +251,7 @@ function MapPane({ side, diffedShapes, otherMapRef, syncingRef, onReady }: PaneP
         fittedForRef.current = diffedShapes;
       }
     }
-  }, [diffedShapes, diffSegmentVisibility, runLineStatus, analysisMode, ready, side]);
+  }, [diffedShapes, diffSegmentVisibility, runLineStatus, analysisMode, ready, side, diffRouteFocus, diffDirectionFocus]);
 
   // Always-on geometry backing this pane's focus glow — every status,
   // unfiltered by the checkboxes, and never emptied in frequency mode (unlike
@@ -343,9 +367,23 @@ function MapPane({ side, diffedShapes, otherMapRef, syncingRef, onReady }: PaneP
     if (side === 'old') setZaehlsprengelPopulationSummary(zaehlsprengelPopulation.summary);
   }, [zaehlsprengelPopulation, analysisMode, populationSource, ready, side, setZaehlsprengelPopulationSummary]);
 
-  // This pane's own stops, at this feed's positions. Ghost/arrow layers stay
-  // empty here — displacement is shown by the moved stop appearing on both
-  // panes, so the single-map ghost+arrow treatment isn't needed.
+  // This pane's stops, at this feed's positions, at whatever the network
+  // shows: this map isn't scoped to the run of a route, and there are no
+  // ghost/arrow layers here — displacement is shown by the moved stop
+  // appearing on both panes. When a line is focused, scope down to just its
+  // own stops the same way `RouteDetailView` does: real `stop_id` membership
+  // first (tells apart same-named stops at an intersection), then proximity
+  // to this side's own filtered runs as a fallback/refinement.
+  const routeRuns = useMemo(() => {
+    if (!diffedShapes || !diffRouteFocus) return [];
+    return diffedShapes.runs.filter(
+      (r) =>
+        r.canonicalId === diffRouteFocus &&
+        (diffDirectionFocus == null || r.direction_id === diffDirectionFocus) &&
+        r.feed === (side === 'old' ? 'a' : 'b'),
+    );
+  }, [diffedShapes, diffRouteFocus, diffDirectionFocus, side]);
+
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready) return;
@@ -353,12 +391,16 @@ function MapPane({ side, diffedShapes, otherMapRef, syncingRef, onReady }: PaneP
       setSource(map, 'diff-stops', emptyFC());
       return;
     }
+    const scoped = diffRouteFocus && routeStopIds
+      ? filterStopsByRouteMembership(diffStatus.result, routeStopIds)
+      : diffStatus.result;
+    const points = diffStopPointsForFeed(scoped, diffStopVisibility, side === 'old' ? 'a' : 'b');
     setSource(
       map,
       'diff-stops',
-      diffStopPointsForFeed(diffStatus.result, diffStopVisibility, side === 'old' ? 'a' : 'b'),
+      diffRouteFocus ? filterFeaturesNearRoute(points, routeRuns, STOP_ROUTE_TOL_M) : points,
     );
-  }, [diffStatus, diffStopVisibility, ready, side]);
+  }, [diffStatus, diffStopVisibility, ready, side, diffRouteFocus, routeStopIds, routeRuns]);
 
   // Always-on stop points backing this pane's focus halo — every status,
   // unfiltered by the checkboxes (frequency mode zeroes them all), so a
@@ -382,11 +424,15 @@ function MapPane({ side, diffedShapes, otherMapRef, syncingRef, onReady }: PaneP
     map.setLayoutProperty('diff-stops-labels', 'visibility', diffStopLabels ? 'visible' : 'none');
   }, [diffStopLabels, ready]);
 
-  // Violet halo on the inspector-focused line/stop, mirrored on both panes so a
-  // moved stop is highlighted at its before and after position at once.
+  // Violet halo on the inspector-focused line, mirrored on both panes — but
+  // only in frequency mode, where the network-wide overlay still draws every
+  // other route so highlighting this one helps it stand out. In plain
+  // geometry mode the panes are already filtered down to just this line (see
+  // the segment effect above), so a glow around it would add nothing.
   useEffect(() => {
-    if (mapRef.current && ready) setDiffRouteHighlight(mapRef.current, diffRouteFocus, diffDirectionFocus);
-  }, [diffRouteFocus, diffDirectionFocus, ready]);
+    if (!mapRef.current || !ready) return;
+    setDiffRouteHighlight(mapRef.current, analysisMode === 'frequency' ? diffRouteFocus : null, diffDirectionFocus);
+  }, [diffRouteFocus, diffDirectionFocus, analysisMode, ready]);
   useEffect(() => {
     if (mapRef.current && ready) setDiffStopHighlight(mapRef.current, diffStopFocus);
   }, [diffStopFocus, ready]);
@@ -421,7 +467,10 @@ function MapPane({ side, diffedShapes, otherMapRef, syncingRef, onReady }: PaneP
       );
       bounds = boundsOfLineFeatures({
         type: 'FeatureCollection',
-        features: features.features.filter((f) => f.properties?.canonical_id === diffRouteFocus),
+        features: features.features.filter((f) =>
+          f.properties?.canonical_id === diffRouteFocus &&
+          (diffDirectionFocus == null || f.properties?.direction_id === diffDirectionFocus),
+        ),
       });
     }
     if (bounds) map.fitBounds(bounds, { padding: 60, duration: 500, maxZoom: 15 });
@@ -447,6 +496,32 @@ export function SplitMapView({ diffedShapes }: { diffedShapes: DiffedShapes | nu
   const toggleDiffStopLabels = useAppStore((s) => s.toggleDiffStopLabels);
   const analysisMode = useAppStore((s) => s.analysisMode);
 
+  // Real stop_id membership for the focused route+direction, computed once
+  // here (not per-pane) and shared by both `MapPane`s — same lookup
+  // `RouteDetailView` uses to scope its stop overlay to just this line.
+  const diffRouteFocus = useAppStore((s) => s.diffRouteFocus);
+  const diffDirectionFocus = useAppStore((s) => s.diffDirectionFocus);
+  const activeFeedId = useAppStore((s) => s.activeFeedId);
+  const compareFeedId = useAppStore((s) => s.compareFeedId);
+  const diffStatus = useDiff(activeFeedId, compareFeedId);
+  const focusedEntry = diffStatus.kind === 'ready' && diffRouteFocus
+    ? diffStatus.result.routes.find((r) => r.canonicalId === diffRouteFocus) ?? null
+    : null;
+  const { stopIdsByDirection } = useLineDirections(focusedEntry, activeFeedId, compareFeedId, !!focusedEntry);
+  const routeStopIds = useMemo(() => {
+    if (!diffRouteFocus) return null;
+    if (diffDirectionFocus != null) {
+      return stopIdsByDirection.get(diffDirectionFocus) ?? { a: new Set<string>(), b: new Set<string>() };
+    }
+    const a = new Set<string>();
+    const b = new Set<string>();
+    for (const bucket of stopIdsByDirection.values()) {
+      for (const id of bucket.a) a.add(id);
+      for (const id of bucket.b) b.add(id);
+    }
+    return { a, b };
+  }, [stopIdsByDirection, diffDirectionFocus, diffRouteFocus]);
+
   const legendItems: Array<{ id: GeomStatus; label: string }> = [
     { id: 'unchanged', label: 'Shared geometry' },
     { id: 'removed', label: 'Removed' },
@@ -466,6 +541,7 @@ export function SplitMapView({ diffedShapes }: { diffedShapes: DiffedShapes | nu
           diffedShapes={diffedShapes}
           otherMapRef={mapNewRef}
           syncingRef={syncingRef}
+          routeStopIds={routeStopIds}
           onReady={(map) => { mapOldRef.current = map; }}
         />
         <MapPane
@@ -473,6 +549,7 @@ export function SplitMapView({ diffedShapes }: { diffedShapes: DiffedShapes | nu
           diffedShapes={diffedShapes}
           otherMapRef={mapOldRef}
           syncingRef={syncingRef}
+          routeStopIds={routeStopIds}
           onReady={(map) => { mapNewRef.current = map; }}
         />
         <BasemapControls />
