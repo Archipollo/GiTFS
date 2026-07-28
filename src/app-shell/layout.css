@@ -38,6 +38,31 @@
   min-height: 0;
   overflow: hidden;
 }
+.app-body > .app-map {
+  min-width: 320px;
+}
+
+.desktop-only-notice {
+  height: 100vh;
+  width: 100vw;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 32px;
+  background: var(--bg);
+  color: var(--fg);
+}
+.desktop-only-notice-body { max-width: 320px; }
+.desktop-only-notice-body h1 {
+  font-size: 18px;
+  margin: 0 0 8px;
+}
+.desktop-only-notice-body p {
+  font-size: 14px;
+  color: var(--fg-dim);
+  margin: 0;
+}
 
 .app-map {
   position: relative;
@@ -124,7 +149,7 @@
 
 .topbar {
   display: grid;
-  grid-template-columns: 1fr auto 1fr;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
   gap: 12px;
   padding: 0 12px;
@@ -142,18 +167,55 @@
   font-weight: 600;
   color: var(--accent);
   letter-spacing: 0.5px;
+  flex-shrink: 0;
 }
-.topbar-center {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  justify-self: center;
-}
+.topbar-center,
 .topbar-right {
   display: flex;
   align-items: center;
   gap: 12px;
-  justify-self: end;
+  min-width: 0;
+}
+.topbar-center { justify-self: center; }
+.topbar-right { justify-self: end; }
+.topbar-center > *,
+.topbar-right > * {
+  flex-shrink: 0;
+}
+.topbar button,
+.topbar select {
+  white-space: nowrap;
+  font-size: 13px;
+  padding: 5px 10px;
+}
+
+@media (max-width: 1440px) {
+  .topbar {
+    gap: 8px;
+    padding: 0 8px;
+  }
+  .topbar-left,
+  .topbar-center,
+  .topbar-right {
+    gap: 8px;
+  }
+  .diff-pair--inline .diff-pair-select {
+    max-width: 200px;
+  }
+  .topbar button,
+  .topbar select {
+    font-size: 12px;
+    padding: 4px 8px;
+  }
+  .topbar button.analysis-menu-trigger,
+  .topbar button.topbar-export-btn {
+    white-space: normal;
+    font-size: 11px;
+    line-height: 1.25;
+    padding: 4px 8px;
+    max-width: 76px;
+    text-align: center;
+  }
 }
 
 /* Map basemap toggle (floating over map, below NavigationControl) ------ */
@@ -326,7 +388,7 @@
   overflow: hidden;
 }
 .drawer.collapsed { height: 36px; }
-.drawer.expanded { height: 360px; }
+.drawer.expanded { height: min(360px, 40vh); }
 .drawer-header {
   display: flex;
   align-items: stretch;
@@ -426,7 +488,7 @@
 }
 .registry-split {
   display: grid;
-  grid-template-columns: 320px 1fr;
+  grid-template-columns: minmax(160px, 320px) 1fr;
   gap: 12px;
   flex: 1;
   min-height: 0;

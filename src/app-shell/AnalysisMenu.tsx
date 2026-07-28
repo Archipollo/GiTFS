@@ -50,7 +50,7 @@ export function AnalysisMenu() {
   return (
     <div className="upload-menu" ref={menuRef}>
       <button
-        className={analysisMode !== 'none' ? 'primary' : undefined}
+        className={`analysis-menu-trigger${analysisMode !== 'none' ? ' primary' : ''}`}
         onClick={() => setOpen((v) => !v)}
         aria-haspopup="menu"
         aria-expanded={open}

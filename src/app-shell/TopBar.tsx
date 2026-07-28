@@ -168,8 +168,8 @@ export default function TopBar() {
         </div>
         {diff.kind === 'ready' && (
           <button
+            className="topbar-export-btn"
             onClick={handleExportDiff}
-            style={{ fontSize: 12 }}
             title="Export the current diff as a GTFS-Diff (MobilityData specification)"
           >
             Export GTFS-Diff
