@@ -52,6 +52,32 @@ export function cogUrlForYear(year: number): string {
 
 export type Bbox = [west: number, south: number, east: number, north: number];
 
+// Meters per degree of latitude is ~constant (WGS84 ellipsoidal variation is
+// negligible at this precision); meters per degree of longitude shrinks
+// toward the poles by cos(latitude), so cell area must be computed per-row,
+// not once for the whole grid.
+const METERS_PER_DEG_LAT = 111_320;
+
+/**
+ * Area of a grid cell in hectares, given its lon/lat size in degrees and its
+ * center latitude. Needed because the tile-pyramid grid's cell size varies
+ * by zoom (see `population.worker.ts`'s `PYRAMID_CELL_PX_LEVELS`) — a raw
+ * summed people-per-cell count means something completely different for a
+ * 100m cell than a 5km one, so every place that classifies or scales a
+ * per-cell value converts it to a density (people/hectare) first via this
+ * helper, which stays comparable across cell sizes.
+ */
+export function cellAreaHectares(cellSizeXDeg: number, cellSizeYDeg: number, centerLatDeg: number): number {
+  const metersPerDegLon = METERS_PER_DEG_LAT * Math.cos((centerLatDeg * Math.PI) / 180);
+  const areaM2 = cellSizeXDeg * metersPerDegLon * cellSizeYDeg * METERS_PER_DEG_LAT;
+  return areaM2 / 10_000;
+}
+
+/** Latitude of the center of grid row `row` (row 0 = northernmost). */
+export function rowCenterLat(grid: Pick<PopulationGrid, 'north' | 'cellSizeY'>, row: number): number {
+  return grid.north - (row + 0.5) * grid.cellSizeY;
+}
+
 export interface PopulationGrid {
   year: number;
   west: number;
@@ -127,12 +153,21 @@ export function getOrFetchPopulationGrid(year: number, bbox: Bbox): Promise<Popu
 
 export interface PopulationSummary {
   year: number;
+  /** People per hectare, not raw people-per-cell — see `cellAreaHectares`.
+   * Comparable across zoom levels even though the underlying grid's cell
+   * size (and so raw per-cell population) varies with the tile-pyramid
+   * level the current viewport picked. */
   maxPopulation: number;
-  /** 95th-percentile cell population — colour/legend scale clamps here, not
-   * at the max, so one dense cell (city center) doesn't wash out every other
-   * cell's colour. Mirrors `scaleWeeklyTrips` in gtfs/frequency.ts. */
+  /** 95th-percentile cell density (people/hectare) — colour/legend scale
+   * clamps here, not at the max, so one dense cell (city center) doesn't
+   * wash out every other cell's colour. Mirrors `scaleWeeklyTrips` in
+   * gtfs/frequency.ts. */
   scalePopulation: number;
   cellCount: number;
+  /** Cell size in meters (north-south edge, latitude-independent) at the
+   * tile-pyramid level the underlying grid resolved to — for the legend
+   * caption ("people per ~Nm cell"). */
+  cellSizeMeters: number;
 }
 
 function summarizeValues(values: readonly number[]): { max: number; scale: number } {
@@ -172,7 +207,13 @@ function getOrComputeReferenceScale(year: number, scaleBbox: Bbox): Promise<{ ma
   if (hit) return hit;
   const p = getOrFetchPopulationGrid(year, scaleBbox).then((grid) => {
     const nonZero: number[] = [];
-    for (const v of grid.values) if (v > 0) nonZero.push(v);
+    for (let row = 0; row < grid.rows; row++) {
+      const area = cellAreaHectares(grid.cellSizeX, grid.cellSizeY, rowCenterLat(grid, row));
+      for (let col = 0; col < grid.cols; col++) {
+        const v = grid.values[row * grid.cols + col];
+        if (v > 0) nonZero.push(v / area);
+      }
+    }
     return summarizeValues(nonZero);
   });
   referenceScaleCache.set(key, p);
@@ -199,7 +240,13 @@ export async function computeFeedPopulation(year: number, bbox: Bbox, scaleBbox:
   for (const v of grid.values) if (v > 0) cellCount++;
   return {
     grid,
-    summary: { year: grid.year, maxPopulation: refScale.max, scalePopulation: refScale.scale, cellCount },
+    summary: {
+      year: grid.year,
+      maxPopulation: refScale.max,
+      scalePopulation: refScale.scale,
+      cellCount,
+      cellSizeMeters: Math.round(grid.cellSizeY * METERS_PER_DEG_LAT),
+    },
   };
 }
 
@@ -211,6 +258,7 @@ export function feedPopulationToGeoJSON(result: FeedPopulationResult): GeoJSON.F
   const scale = summary.scalePopulation > 0 ? summary.scalePopulation : 1;
   const features: GeoJSON.Feature[] = [];
   for (let row = 0; row < grid.rows; row++) {
+    const area = cellAreaHectares(grid.cellSizeX, grid.cellSizeY, rowCenterLat(grid, row));
     for (let col = 0; col < grid.cols; col++) {
       const value = grid.values[row * grid.cols + col];
       if (value <= 0) continue;
@@ -218,10 +266,15 @@ export function feedPopulationToGeoJSON(result: FeedPopulationResult): GeoJSON.F
       const e = w + grid.cellSizeX;
       const n = grid.north - row * grid.cellSizeY;
       const s = n - grid.cellSizeY;
+      const density = value / area;
       features.push({
         type: 'Feature',
         geometry: { type: 'Polygon', coordinates: [[[w, s], [e, s], [e, n], [w, n], [w, s]]] },
-        properties: { population: value, pop_norm: Math.max(0, Math.min(1, value / scale)) },
+        properties: {
+          population: value,
+          pop_density: density,
+          pop_norm: Math.max(0, Math.min(1, density / scale)),
+        },
       });
     }
   }

@@ -53,9 +53,27 @@ function getTiff(year: number): Promise<GeoTIFF> {
 // Hard cap on the decimated output grid so a country-scale bbox at low zoom
 // still produces a renderable number of fill polygons (and a bounded
 // `readRasters` decode/transfer cost) instead of millions of 100m cells.
-// Cells simply get coarser as the requested bbox grows — same tradeoff a
-// tile service makes by serving a lower zoom level.
 const MAX_GRID_DIM = 220;
+
+// Discrete tile-pyramid levels, in native ~92.5m GHS-POP pixels per output
+// cell (1, 3, 5, 11, 27, 54, 108, 216 ≈ 100m/250m/500m/1km/2.5km/5km/10km/
+// 20km cells). Picking cell size from this fixed set — rather than the
+// continuous `nativeSpan / MAX_GRID_DIM` this used to compute — means
+// panning/zooming a few pixels can't silently change what a cell physically
+// covers: the map only ever renders one of a handful of known, labelable
+// cell sizes, and two requests at similar zoom get the *same* cell size
+// instead of two arbitrarily different ones. See `pickPyramidCellPx`.
+const PYRAMID_CELL_PX_LEVELS: readonly number[] = [1, 3, 5, 11, 27, 54, 108, 216];
+
+/** Picks the finest pyramid cell size (in native pixels) whose output grid
+ * fits within MAX_GRID_DIM for a window spanning `nativeSpanPx` native
+ * pixels — i.e. the tile-pyramid level the current viewport would use. */
+function pickPyramidCellPx(nativeSpanPx: number): number {
+  for (const level of PYRAMID_CELL_PX_LEVELS) {
+    if (Math.ceil(nativeSpanPx / level) <= MAX_GRID_DIM) return level;
+  }
+  return PYRAMID_CELL_PX_LEVELS[PYRAMID_CELL_PX_LEVELS.length - 1];
+}
 
 // Cap on how many native pixels we'll ever decode in one dimension before
 // aggregating down to MAX_GRID_DIM. GHS-POP stores population *count* per
@@ -193,8 +211,9 @@ async function readPopulationGrid(req: PopulationGridRequest): Promise<Populatio
     return { id: req.id, year: req.year, west: clampedWest, north: clampedNorth, cellSizeX: 0, cellSizeY: 0, cols: 0, rows: 0, values: new Float32Array(0) };
   }
 
-  const outW = Math.min(right - left, MAX_GRID_DIM);
-  const outH = Math.min(bottom - top, MAX_GRID_DIM);
+  const cellPx = pickPyramidCellPx(Math.max(right - left, bottom - top));
+  const outW = Math.min(MAX_GRID_DIM, Math.ceil((right - left) / cellPx));
+  const outH = Math.min(MAX_GRID_DIM, Math.ceil((bottom - top) / cellPx));
 
   const west = GRID_ORIGIN_LON + (imgLeftPx + left) / GRID_PX_PER_DEG;
   const east = GRID_ORIGIN_LON + (imgLeftPx + right) / GRID_PX_PER_DEG;
@@ -315,9 +334,10 @@ async function readEpochPopulationGrid(req: PopulationGridRequest): Promise<Popu
     };
   }
 
-  const outW = Math.min(right - left, MAX_GRID_DIM);
-  const outH = Math.min(bottom - top, MAX_GRID_DIM);
-  const factor = (right - left) / outW; // native px per output px (>= 1)
+  const cellPx = pickPyramidCellPx(Math.max(right - left, bottom - top));
+  const outW = Math.min(MAX_GRID_DIM, Math.ceil((right - left) / cellPx));
+  const outH = Math.min(MAX_GRID_DIM, Math.ceil((bottom - top) / cellPx));
+  const factor = cellPx; // native px per output px (>= 1), from the same pyramid level as readPopulationGrid
 
   const west = GRID_ORIGIN_LON + left / GRID_PX_PER_DEG;
   const north = GRID_ORIGIN_LAT - top / GRID_PX_PER_DEG;

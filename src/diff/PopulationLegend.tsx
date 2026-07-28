@@ -29,7 +29,7 @@ function fmt(n: number): string {
   return String(Math.round(n));
 }
 
-function DiffStationsSection() {
+export function DiffStationsSection() {
   const [open, setOpen] = useState(false);
   const diffStopVisibility = useAppStore((s) => s.diffStopVisibility);
   const toggleDiffStopVisibility = useAppStore((s) => s.toggleDiffStopVisibility);
@@ -69,7 +69,7 @@ function DiffStationsSection() {
   );
 }
 
-function FeedStationsSection() {
+export function FeedStationsSection() {
   const [open, setOpen] = useState(false);
   const showStops = useAppStore((s) => s.showStops);
   const setShowStops = useAppStore((s) => s.setShowStops);
@@ -103,11 +103,11 @@ function AbsolutePopulationBlock({ summary, caption }: { summary: PopulationSumm
   const capped = maxPopulation > scalePopulation;
   const [b0, b1, b2, b3] = POPULATION_CLASS_BREAKS.map((f) => f * scalePopulation);
   const classes = [
-    { color: POPULATION_LOWEST_COLOR, label: `0 to ${fmt(b0)}` },
-    { color: POPULATION_LOW_COLOR, label: `${fmt(b0)} to ${fmt(b1)}` },
-    { color: POPULATION_MID_COLOR, label: `${fmt(b1)} to ${fmt(b2)}` },
-    { color: POPULATION_HIGH_COLOR, label: `${fmt(b2)} to ${fmt(b3)}` },
-    { color: POPULATION_HIGHEST_COLOR, label: `≥ ${fmt(b3)}` },
+    { color: POPULATION_LOWEST_COLOR, label: `0 to ${fmt(b0)}/ha` },
+    { color: POPULATION_LOW_COLOR, label: `${fmt(b0)} to ${fmt(b1)}/ha` },
+    { color: POPULATION_MID_COLOR, label: `${fmt(b1)} to ${fmt(b2)}/ha` },
+    { color: POPULATION_HIGH_COLOR, label: `${fmt(b2)} to ${fmt(b3)}/ha` },
+    { color: POPULATION_HIGHEST_COLOR, label: `≥ ${fmt(b3)}/ha` },
   ];
   return (
     <div className="frequency-legend">
@@ -121,10 +121,19 @@ function AbsolutePopulationBlock({ summary, caption }: { summary: PopulationSumm
       </div>
       <div className="muted frequency-legend-caption">
         {caption}
-        {capped && ` (classes capped at the 95th percentile; densest cell has ${fmt(maxPopulation)})`}
+        {capped && ` (classes capped at the 95th percentile; densest cell has ${fmt(maxPopulation)}/ha)`}
       </div>
     </div>
   );
+}
+
+/** Cell-size fragment for a legend caption, e.g. "~500m" — reads the actual
+ * tile-pyramid level the current grid resolved to (see
+ * `PYRAMID_CELL_PX_LEVELS` in gtfs/population.worker.ts) instead of the
+ * `~100m` that used to be hardcoded regardless of zoom. */
+function cellSizeLabel(cellSizeMeters: number): string {
+  if (cellSizeMeters >= 1000) return `~${(cellSizeMeters / 1000).toLocaleString()}km`;
+  return `~${fmt(cellSizeMeters)}m`;
 }
 
 export function PopulationLegend() {
@@ -134,6 +143,8 @@ export function PopulationLegend() {
   const feedSummary = useAppStore((s) => s.feedPopulationSummary);
   const splitSummary = useAppStore((s) => s.splitPopulationSummary);
   const zaehlsprengelSummary = useAppStore((s) => s.zaehlsprengelPopulationSummary);
+  const populationClassMode = useAppStore((s) => s.populationClassMode);
+  const setPopulationClassMode = useAppStore((s) => s.setPopulationClassMode);
 
   if (populationSource === 'zsp') {
     if (!zaehlsprengelSummary) {
@@ -179,11 +190,11 @@ export function PopulationLegend() {
       <>
         <AbsolutePopulationBlock
           summary={splitSummary.a}
-          caption={`Left: people per ~100m cell (${splitSummary.a.year}, GHS-POP)`}
+          caption={`Left: people per hectare, ${cellSizeLabel(splitSummary.a.cellSizeMeters)} cell (${splitSummary.a.year}, GHS-POP)`}
         />
         <AbsolutePopulationBlock
           summary={splitSummary.b}
-          caption={`Right: people per ~100m cell (${splitSummary.b.year}, GHS-POP)`}
+          caption={`Right: people per hectare, ${cellSizeLabel(splitSummary.b.cellSizeMeters)} cell (${splitSummary.b.year}, GHS-POP)`}
         />
         <DiffStationsSection />
       </>
@@ -191,15 +202,15 @@ export function PopulationLegend() {
   }
 
   if (diffSummary?.mode === 'absolute') {
-    const { scalePopulation, maxPopulation, yearB } = diffSummary;
+    const { scalePopulation, maxPopulation, yearB, cellSizeMeters } = diffSummary;
     const capped = maxPopulation > scalePopulation;
     const [b0, b1, b2, b3] = POPULATION_CLASS_BREAKS.map((f) => f * scalePopulation);
     const classes = [
-      { color: POPULATION_LOWEST_COLOR, label: `0 to ${fmt(b0)}` },
-      { color: POPULATION_LOW_COLOR, label: `${fmt(b0)} to ${fmt(b1)}` },
-      { color: POPULATION_MID_COLOR, label: `${fmt(b1)} to ${fmt(b2)}` },
-      { color: POPULATION_HIGH_COLOR, label: `${fmt(b2)} to ${fmt(b3)}` },
-      { color: POPULATION_HIGHEST_COLOR, label: `≥ ${fmt(b3)}` },
+      { color: POPULATION_LOWEST_COLOR, label: `0 to ${fmt(b0)}/ha` },
+      { color: POPULATION_LOW_COLOR, label: `${fmt(b0)} to ${fmt(b1)}/ha` },
+      { color: POPULATION_MID_COLOR, label: `${fmt(b1)} to ${fmt(b2)}/ha` },
+      { color: POPULATION_HIGH_COLOR, label: `${fmt(b2)} to ${fmt(b3)}/ha` },
+      { color: POPULATION_HIGHEST_COLOR, label: `≥ ${fmt(b3)}/ha` },
     ];
     return (
       <div className="frequency-legend">
@@ -212,8 +223,8 @@ export function PopulationLegend() {
           ))}
         </div>
         <div className="muted frequency-legend-caption">
-          Same GHS-POP year on both sides ({yearB}) — showing people per ~100m cell
-          {capped && ` (classes capped at the 95th percentile; densest cell has ${fmt(maxPopulation)})`}
+          Same GHS-POP year on both sides ({yearB}) — showing people per hectare, {cellSizeLabel(cellSizeMeters)} cell
+          {capped && ` (classes capped at the 95th percentile; densest cell has ${fmt(maxPopulation)}/ha)`}
         </div>
         <DiffStationsSection />
       </div>
@@ -221,15 +232,38 @@ export function PopulationLegend() {
   }
 
   if (diffSummary) {
-    const { maxAbsDelta, yearA, yearB } = diffSummary;
+    const { maxAbsDelta, yearA, yearB, cellSizeMeters } = diffSummary;
+    const densityToggle = (
+      <label className="frequency-legend-toggle">
+        <input
+          type="checkbox"
+          checked={populationClassMode === 'density'}
+          onChange={(e) => setPopulationClassMode(e.target.checked ? 'density' : 'change')}
+        />
+        Show density instead of change
+      </label>
+    );
+    if (populationClassMode === 'density') {
+      const { maxPopulation, scalePopulation, cellCount } = diffSummary;
+      return (
+        <div className="frequency-legend">
+          <AbsolutePopulationBlock
+            summary={{ year: yearB, maxPopulation, scalePopulation, cellCount, cellSizeMeters }}
+            caption={`${yearB} density (GHS-POP), ${cellSizeLabel(cellSizeMeters)} cell`}
+          />
+          {densityToggle}
+          <DiffStationsSection />
+        </div>
+      );
+    }
     const [b0, b1, b2, b3] = POPULATION_DIFF_CLASS_BREAKS;
     const capped = maxAbsDelta > b3;
     const classes = [
-      { color: POPULATION_BIG_LOSS_COLOR, label: `≤ −${fmt(-b0)}` },
-      { color: POPULATION_SMALL_LOSS_COLOR, label: `−${fmt(-b0)} to −${fmt(-b1)}` },
-      { color: POPULATION_NEUTRAL_COLOR, label: `−${fmt(-b1)} to +${fmt(b2)}` },
-      { color: POPULATION_SMALL_GAIN_COLOR, label: `+${fmt(b2)} to +${fmt(b3)}` },
-      { color: POPULATION_BIG_GAIN_COLOR, label: `≥ +${fmt(b3)}` },
+      { color: POPULATION_BIG_LOSS_COLOR, label: `≤ −${fmt(-b0)}/ha` },
+      { color: POPULATION_SMALL_LOSS_COLOR, label: `−${fmt(-b0)} to −${fmt(-b1)}/ha` },
+      { color: POPULATION_NEUTRAL_COLOR, label: `−${fmt(-b1)} to +${fmt(b2)}/ha` },
+      { color: POPULATION_SMALL_GAIN_COLOR, label: `+${fmt(b2)} to +${fmt(b3)}/ha` },
+      { color: POPULATION_BIG_GAIN_COLOR, label: `≥ +${fmt(b3)}/ha` },
     ];
     return (
       <div className="frequency-legend">
@@ -242,9 +276,10 @@ export function PopulationLegend() {
           ))}
         </div>
         <div className="muted frequency-legend-caption">
-          People gained or lost per ~100m cell, {yearA} → {yearB} (GHS-POP)
-          {capped && ` (largest change is ${fmt(maxAbsDelta)})`}
+          People gained or lost per hectare, {cellSizeLabel(cellSizeMeters)} cell, {yearA} → {yearB} (GHS-POP)
+          {capped && ` (largest change is ${fmt(maxAbsDelta)}/ha)`}
         </div>
+        {densityToggle}
         <DiffStationsSection />
       </div>
     );
@@ -255,7 +290,7 @@ export function PopulationLegend() {
       <>
         <AbsolutePopulationBlock
           summary={feedSummary}
-          caption={`People per ~100m cell (${feedSummary.year}, GHS-POP)`}
+          caption={`People per hectare, ${cellSizeLabel(feedSummary.cellSizeMeters)} cell (${feedSummary.year}, GHS-POP)`}
         />
         <FeedStationsSection />
       </>

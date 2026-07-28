@@ -26,6 +26,7 @@ import { FrequencyLegend } from './FrequencyLegend';
 import {
   createDiffMapStyle,
   addDiffFrequencyLayers,
+  frequencyColorExpr,
   addDiffSegmentLayers,
   addDiffStopLayers,
   attachDiffFrequencyClickHandler,
@@ -88,6 +89,7 @@ export function RouteDetailView({ diffedShapes }: { diffedShapes: DiffedShapes |
   const toggleDiffStopLabels = useAppStore((s) => s.toggleDiffStopLabels);
   const analysisMode = useAppStore((s) => s.analysisMode);
   const frequencyIncludeAddedRemoved = useAppStore((s) => s.frequencyIncludeAddedRemoved);
+  const frequencyClassMode = useAppStore((s) => s.frequencyClassMode);
   const diffDirectionFocus = useAppStore((s) => s.diffDirectionFocus);
   const setDiffDirectionFocus = useAppStore((s) => s.setDiffDirectionFocus);
   const diffRouteDirections = useAppStore((s) => s.diffRouteDirections);
@@ -194,7 +196,7 @@ export function RouteDetailView({ diffedShapes }: { diffedShapes: DiffedShapes |
       addDiffSegmentLayers(map);
       // Focused line mode: names show at any zoom (map is scoped to one line).
       addDiffStopLayers(map, { labelMinZoom: 0 });
-      addDiffFrequencyLayers(map);
+      addDiffFrequencyLayers(map, useAppStore.getState().frequencyClassMode);
       // Frequency here is network-wide (see the comment above), so clicking a
       // different line while it's active should re-focus the inspector onto
       // that line rather than being a no-op.
@@ -314,7 +316,8 @@ export function RouteDetailView({ diffedShapes }: { diffedShapes: DiffedShapes |
       return;
     }
     setSource(map, 'diff-frequency', frequencyDiffToGeoJSON(filterFrequencyDiff(frequency, frequencyIncludeAddedRemoved)));
-  }, [frequency, analysisMode, ready, frequencyIncludeAddedRemoved]);
+    map.setPaintProperty('diff-frequency-line', 'line-color', frequencyColorExpr(frequencyClassMode));
+  }, [frequency, analysisMode, ready, frequencyIncludeAddedRemoved, frequencyClassMode]);
 
   // Stop-diff, scoped to this route's stops. Stop entries don't carry a route
   // id, so membership is narrowed two ways: first to the actual `stop_id`s

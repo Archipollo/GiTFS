@@ -5,6 +5,10 @@ import type { StopStatus, RouteStatus } from '../diff/engine';
 import type { GeomStatus } from '../gtfs/segment-graph';
 import { yearOfFeed } from '../timeline/math';
 import type { PopulationSummary } from '../gtfs/population';
+import type { GueteklassenSummary } from '../gtfs/gueteklassen';
+import type { GueteklassenChangeSummary } from '../diff/gueteklassen';
+import type { FrequencyClassMode } from '../diff/frequency';
+import type { PopulationClassMode } from '../diff/population';
 
 export interface FeedMeta {
   id: string;
@@ -80,6 +84,11 @@ export interface MapCamera {
   bearing: number;
   pitch: number;
 }
+
+/** The active analysis overlay — see the doc comment on `analysisMode`
+ * below for what each mode does. Exported so every consumer (menu, map
+ * views) can share one union instead of repeating it inline. */
+export type AnalysisMode = 'none' | 'frequency' | 'population' | 'gueteklassen';
 
 export interface AppState {
   /** Re-runs the oldest/newest-feed diff-pair auto-pick, run once at boot and
@@ -190,8 +199,8 @@ export interface AppState {
    * unreadable). Where there's no diff pair (single-feed/timeline view),
    * `'frequency'` shows each route's absolute trips/week instead.
    */
-  analysisMode: 'none' | 'frequency' | 'population';
-  setAnalysisMode: (m: 'none' | 'frequency' | 'population') => void;
+  analysisMode: AnalysisMode;
+  setAnalysisMode: (m: AnalysisMode) => void;
   /**
    * Which dataset backs the population overlay: `'ghs'` (GHS-POP global
    * raster, default — the only source with a year-over-year series, so it's
@@ -210,6 +219,22 @@ export interface AppState {
    */
   frequencyIncludeAddedRemoved: boolean;
   setFrequencyIncludeAddedRemoved: (v: boolean) => void;
+  /**
+   * Which fixed scale classifies a route's frequency change: relative to its
+   * own baseline (percent) or a flat trips/week amount. Both use fixed
+   * breakpoints, so switching this (or `frequencyIncludeAddedRemoved`) never
+   * shifts the legend's class boundaries.
+   */
+  frequencyClassMode: FrequencyClassMode;
+  setFrequencyClassMode: (v: FrequencyClassMode) => void;
+  /**
+   * Which fixed scale colours the network-diff population overlay:
+   * loss/gain per cell (`'change'`, the default) or feed B's absolute
+   * density (`'density'`), so a viewer can see general density without
+   * leaving diff mode. Mirrors `frequencyClassMode` above.
+   */
+  populationClassMode: PopulationClassMode;
+  setPopulationClassMode: (v: PopulationClassMode) => void;
   /**
    * Frequency-overlay legend data for diff mode, updated by the map after it
    * computes the trips/week diff — mirrors `diffSegmentSummary`'s "compute
@@ -275,6 +300,7 @@ export interface AppState {
         maxPopulation: number;
         scalePopulation: number;
         cellCount: number;
+        cellSizeMeters: number;
       }
     | null;
   setDiffPopulationSummary: (
@@ -290,6 +316,7 @@ export interface AppState {
           maxPopulation: number;
           scalePopulation: number;
           cellCount: number;
+          cellSizeMeters: number;
         }
       | null,
   ) => void;
@@ -303,6 +330,7 @@ export interface AppState {
         maxPopulation: number;
         scalePopulation: number;
         cellCount: number;
+        cellSizeMeters: number;
       }
     | null;
   setFeedPopulationSummary: (
@@ -312,6 +340,7 @@ export interface AppState {
           maxPopulation: number;
           scalePopulation: number;
           cellCount: number;
+          cellSizeMeters: number;
         }
       | null,
   ) => void;
@@ -349,6 +378,28 @@ export interface AppState {
         }
       | null,
   ) => void;
+  /**
+   * ÖV-Güteklassen-overlay legend data for the no-diff-pair case: absolute
+   * A-G class counts for the active feed. Mirrors `feedPopulationSummary`.
+   */
+  feedGueteklassenSummary: GueteklassenSummary | null;
+  setFeedGueteklassenSummary: (s: GueteklassenSummary | null) => void;
+  /**
+   * ÖV-Güteklassen-overlay legend data for split view's per-pane absolute
+   * display — like population's split summary, each pane shows its own
+   * feed's classes independently (A-G is ordinal, not subtractable, so
+   * there's no per-cell delta to show instead). Either side is null until
+   * that pane has finished its own compute.
+   */
+  splitGueteklassenSummary: { a: GueteklassenSummary | null; b: GueteklassenSummary | null };
+  setSplitGueteklassenSummary: (side: 'a' | 'b', summary: GueteklassenSummary | null) => void;
+  /**
+   * ÖV-Güteklassen-overlay legend data for the network-diff overview: counts
+   * per categorical change (improved/degraded/unchanged/gained/lost) between
+   * feed A's and feed B's classes.
+   */
+  diffGueteklassenSummary: GueteklassenChangeSummary | null;
+  setDiffGueteklassenSummary: (s: GueteklassenChangeSummary | null) => void;
   /**
    * Per-status total segment length in metres, updated by the map after it
    * builds the segment diff. Lives in the store (rather than being
@@ -714,6 +765,10 @@ export const useAppStore = create<AppState>((set) => ({
     }),
   frequencyIncludeAddedRemoved: false,
   setFrequencyIncludeAddedRemoved: (v) => set({ frequencyIncludeAddedRemoved: v }),
+  frequencyClassMode: 'relative',
+  setFrequencyClassMode: (v) => set({ frequencyClassMode: v }),
+  populationClassMode: 'change',
+  setPopulationClassMode: (v) => set({ populationClassMode: v }),
   diffFrequencySummary: null,
   setDiffFrequencySummary: (diffFrequencySummary) => set({ diffFrequencySummary }),
   feedFrequencySummary: null,
@@ -729,6 +784,13 @@ export const useAppStore = create<AppState>((set) => ({
     set((s) => ({ splitPopulationSummary: { ...s.splitPopulationSummary, [side]: summary } })),
   zaehlsprengelPopulationSummary: null,
   setZaehlsprengelPopulationSummary: (zaehlsprengelPopulationSummary) => set({ zaehlsprengelPopulationSummary }),
+  feedGueteklassenSummary: null,
+  setFeedGueteklassenSummary: (feedGueteklassenSummary) => set({ feedGueteklassenSummary }),
+  splitGueteklassenSummary: { a: null, b: null },
+  setSplitGueteklassenSummary: (side, summary) =>
+    set((s) => ({ splitGueteklassenSummary: { ...s.splitGueteklassenSummary, [side]: summary } })),
+  diffGueteklassenSummary: null,
+  setDiffGueteklassenSummary: (diffGueteklassenSummary) => set({ diffGueteklassenSummary }),
   diffSegmentSummary: null,
   setDiffSegmentSummary: (diffSegmentSummary) => set({ diffSegmentSummary }),
   diffStopFocus: null,

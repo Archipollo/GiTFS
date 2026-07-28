@@ -45,7 +45,14 @@ import {
   type Bbox,
 } from '../gtfs/population';
 import { getOrComputeZaehlsprengelPopulation, type ZaehlsprengelResult } from '../gtfs/zaehlsprengel';
-import { attachPopulationTooltip } from '../diff/diffMapLayers';
+import { attachPopulationTooltip, addGueteklassenLayer, attachGueteklassenTooltip } from '../diff/diffMapLayers';
+import {
+  computeFeedGueteklassen,
+  feedGueteklassenToGeoJSON,
+  dropFeedGueteklassenCache,
+  type FeedGueteklassenResult,
+} from '../gtfs/gueteklassen';
+import { GueteklassenLegend } from '../diff/GueteklassenLegend';
 import MapOverlay from './MapOverlay';
 import { BasemapControls } from './BasemapControls';
 import { basemapLayers, basemapSources, useBasemap } from './basemap';
@@ -112,6 +119,7 @@ export default function MapView() {
   const setFeedPopulationSummary = useAppStore((s) => s.setFeedPopulationSummary);
   const populationSource = useAppStore((s) => s.populationSource);
   const setZaehlsprengelPopulationSummary = useAppStore((s) => s.setZaehlsprengelPopulationSummary);
+  const setFeedGueteklassenSummary = useAppStore((s) => s.setFeedGueteklassenSummary);
 
   // Prebuilt-GeoJSON cache keyed by feedId. Populated lazily on first view of
   // a feed and proactively by the background prefetcher. Once a feed is here,
@@ -195,6 +203,9 @@ export default function MapView() {
         },
       });
       attachPopulationTooltip(map, 'analysis-population-fill');
+      // Same "under everything" placement as the population fill above.
+      addGueteklassenLayer(map, 'analysis-gueteklassen', 'analysis-gueteklassen-fill');
+      attachGueteklassenTooltip(map, 'analysis-gueteklassen-fill');
       // Width encodes trips/week (not just zoom): a low-frequency route stays
       // near the thin end at any zoom, a high-frequency one renders near the
       // thick end — same "magnitude in the line itself" treatment as the
@@ -232,7 +243,7 @@ export default function MapView() {
         paint: {
           'line-color': [
             'step',
-            ['get', 'trips_norm'],
+            ['get', 'trips_per_week'],
             FEED_FREQUENCY_LOWEST_COLOR,
             FEED_FREQUENCY_CLASS_BREAKS[0], FEED_FREQUENCY_LOW_COLOR,
             FEED_FREQUENCY_CLASS_BREAKS[1], FEED_FREQUENCY_MID_COLOR,
@@ -522,6 +533,7 @@ export default function MapView() {
         dropShapeIndex(key);
         dropDiffCache(key);
         dropFeedFrequencyCache(key);
+        dropFeedGueteklassenCache(key);
       }
     }
     for (const key of [...pendingRef.current.keys()]) {
@@ -625,6 +637,7 @@ export default function MapView() {
       maxPopulation: feedPopulation.summary.maxPopulation,
       scalePopulation: feedPopulation.summary.scalePopulation,
       cellCount: feedPopulation.summary.cellCount,
+      cellSizeMeters: feedPopulation.summary.cellSizeMeters,
     });
   }, [analysisMode, populationSource, feedPopulation, ready, setFeedPopulationSummary]);
 
@@ -659,6 +672,33 @@ export default function MapView() {
     setSource(map, 'analysis-population', zaehlsprengelPopulation.geojson);
     setZaehlsprengelPopulationSummary(zaehlsprengelPopulation.summary);
   }, [analysisMode, populationSource, zaehlsprengelPopulation, ready, setZaehlsprengelPopulationSummary]);
+
+  // ÖV-Güteklassen analysis — a fill layer under routes/stops like population,
+  // scoped to the current viewport (see gtfs/gueteklassen.ts).
+  const [feedGueteklassen, setFeedGueteklassen] = useState<FeedGueteklassenResult | null>(null);
+  useEffect(() => {
+    if (analysisMode !== 'gueteklassen' || !activeFeedId || !populationBounds) {
+      setFeedGueteklassen(null);
+      return;
+    }
+    let cancelled = false;
+    computeFeedGueteklassen(activeFeedId, populationBounds)
+      .then((r) => { if (!cancelled) setFeedGueteklassen(r); })
+      .catch((err) => console.warn('feed gueteklassen compute failed', err));
+    return () => { cancelled = true; };
+  }, [analysisMode, activeFeedId, populationBounds]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    if (analysisMode !== 'gueteklassen' || !feedGueteklassen) {
+      setFeedGueteklassenSummary(null);
+      setSource(map, 'analysis-gueteklassen', emptyFC());
+      return;
+    }
+    setSource(map, 'analysis-gueteklassen', feedGueteklassenToGeoJSON(feedGueteklassen));
+    setFeedGueteklassenSummary(feedGueteklassen.summary);
+  }, [analysisMode, feedGueteklassen, ready, setFeedGueteklassenSummary]);
 
   // Basemap style + era-matched Wayback satellite, shared with the diff views.
   const basemapYear = useAppStore((s) =>
@@ -792,6 +832,8 @@ export default function MapView() {
           <FrequencyLegend />
         ) : analysisMode === 'population' ? (
           <PopulationLegend />
+        ) : analysisMode === 'gueteklassen' ? (
+          <GueteklassenLegend />
         ) : (
           MODES.map((m) => (
             <label key={m} className={`diff-count ${modeVisibility[m] ? 'on' : 'off'}`}>

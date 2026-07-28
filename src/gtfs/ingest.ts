@@ -168,7 +168,7 @@ function buildCreateSql(table: string, csvVirtualPath: string, name: GtfsFileNam
     case 'stop_times.txt':
       return `
         CREATE OR REPLACE TABLE ${table} AS
-        SELECT stop_id, trip_id, stop_sequence
+        SELECT stop_id, trip_id, stop_sequence, departure_time
         FROM ${src};
       `;
     case 'shapes.txt':

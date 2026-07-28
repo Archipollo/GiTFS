@@ -19,8 +19,14 @@ import { getOrComputeFrequencyDiff, frequencyDiffToGeoJSON, filterFrequencyDiff,
 import { computeFeedPopulation, feedPopulationToGeoJSON, type FeedPopulationResult, type Bbox } from '../gtfs/population';
 import { boundsOfDiffedShapes } from './population';
 import { getOrComputeZaehlsprengelPopulation, type ZaehlsprengelResult } from '../gtfs/zaehlsprengel';
+import {
+  computeFeedGueteklassen,
+  feedGueteklassenToGeoJSON,
+  type FeedGueteklassenResult,
+} from '../gtfs/gueteklassen';
 import { FrequencyLegend } from './FrequencyLegend';
 import { PopulationLegend } from './PopulationLegend';
+import { GueteklassenLegend } from './GueteklassenLegend';
 import { yearOfFeed } from '../timeline/math';
 import { BasemapControls } from '../map/BasemapControls';
 import { useBasemap } from '../map/basemap';
@@ -32,8 +38,11 @@ import {
   addDiffSegmentLayers,
   addDiffStopLayers,
   addDiffFrequencyLayers,
+  frequencyColorExpr,
   addDiffPopulationLayers,
+  addGueteklassenLayer,
   attachPopulationTooltip,
+  attachGueteklassenTooltip,
   attachDiffSegmentClickHandler,
   attachDiffFrequencyClickHandler,
   attachDiffStopClickHandler,
@@ -103,9 +112,11 @@ function MapPane({ side, diffedShapes, otherMapRef, syncingRef, onReady, routeSt
   const analysisMode = useAppStore((s) => s.analysisMode);
   const setDiffFrequencySummary = useAppStore((s) => s.setDiffFrequencySummary);
   const frequencyIncludeAddedRemoved = useAppStore((s) => s.frequencyIncludeAddedRemoved);
+  const frequencyClassMode = useAppStore((s) => s.frequencyClassMode);
   const setSplitPopulationSummary = useAppStore((s) => s.setSplitPopulationSummary);
   const populationSource = useAppStore((s) => s.populationSource);
   const setZaehlsprengelPopulationSummary = useAppStore((s) => s.setZaehlsprengelPopulationSummary);
+  const setSplitGueteklassenSummary = useAppStore((s) => s.setSplitGueteklassenSummary);
   // Both panes read the same cached (A,B) diff — `useDiff` hits `peekDiff`, so
   // the second pane adds no worker work for an already-diffed pair.
   const diffStatus = useDiff(activeFeedId, compareFeedId);
@@ -164,12 +175,17 @@ function MapPane({ side, diffedShapes, otherMapRef, syncingRef, onReady, routeSt
     map.on('load', () => {
       // Added first so the fill sits at the very bottom of the diff stack,
       // under the segment/stop layers added below.
-      addDiffPopulationLayers(map);
+      // Split view always shows each pane's own absolute density (see the
+      // population effect below) — never a delta — so the fill is fixed to
+      // the density ramp regardless of the diff view's `populationClassMode`.
+      addDiffPopulationLayers(map, 'density');
       attachPopulationTooltip(map, 'diff-population-fill');
+      addGueteklassenLayer(map, 'diff-gueteklassen', 'diff-gueteklassen-fill');
+      attachGueteklassenTooltip(map, 'diff-gueteklassen-fill');
       addDiffSegmentLayers(map);
       // Split panes are network-scale like the overview: gate labels to z12+.
       addDiffStopLayers(map, { labelMinZoom: 12 });
-      addDiffFrequencyLayers(map);
+      addDiffFrequencyLayers(map, useAppStore.getState().frequencyClassMode);
 
       map.on('move', () => {
         if (syncingRef.current) return;
@@ -293,6 +309,7 @@ function MapPane({ side, diffedShapes, otherMapRef, syncingRef, onReady, routeSt
     }
     const filtered = filterFrequencyDiff(frequency, frequencyIncludeAddedRemoved);
     setSource(map, 'diff-frequency', frequencyDiffToGeoJSON(filtered));
+    map.setPaintProperty('diff-frequency-line', 'line-color', frequencyColorExpr(frequencyClassMode));
     // Only the 'old' pane writes the shared legend summary, mirroring the
     // "only 'old' fits bounds" convention above — avoids a duplicate write.
     if (side === 'old') {
@@ -304,7 +321,7 @@ function MapPane({ side, diffedShapes, otherMapRef, syncingRef, onReady, routeSt
         routeCount: filtered.entries.length,
       });
     }
-  }, [frequency, analysisMode, ready, side, frequencyIncludeAddedRemoved, setDiffFrequencySummary]);
+  }, [frequency, analysisMode, ready, side, frequencyIncludeAddedRemoved, frequencyClassMode, setDiffFrequencySummary]);
 
   // Population overlay — absolute, per pane. Unlike frequency/geometry, split
   // view deliberately does *not* diff population between the two feed years:
@@ -366,6 +383,35 @@ function MapPane({ side, diffedShapes, otherMapRef, syncingRef, onReady, routeSt
     setSource(map, 'diff-population', zaehlsprengelPopulation.geojson);
     if (side === 'old') setZaehlsprengelPopulationSummary(zaehlsprengelPopulation.summary);
   }, [zaehlsprengelPopulation, analysisMode, populationSource, ready, side, setZaehlsprengelPopulationSummary]);
+
+  // ÖV-Güteklassen overlay — absolute per pane, like population's absolute
+  // split mode: each pane shows its own feed's A-G classes independently
+  // (ordinal, not subtractable — see diff/gueteklassen.ts).
+  const paneFeedId = side === 'old' ? activeFeedId : compareFeedId;
+  const [gueteklassen, setGueteklassen] = useState<FeedGueteklassenResult | null>(null);
+  useEffect(() => {
+    if (analysisMode !== 'gueteklassen' || !paneFeedId || !populationBounds) {
+      setGueteklassen(null);
+      return;
+    }
+    let cancelled = false;
+    computeFeedGueteklassen(paneFeedId, populationBounds)
+      .then((r) => { if (!cancelled) setGueteklassen(r); })
+      .catch((err) => console.warn('split gueteklassen compute failed', err));
+    return () => { cancelled = true; };
+  }, [analysisMode, paneFeedId, populationBounds]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    if (!gueteklassen || analysisMode !== 'gueteklassen') {
+      setSplitGueteklassenSummary(side === 'old' ? 'a' : 'b', null);
+      setSource(map, 'diff-gueteklassen', emptyFC());
+      return;
+    }
+    setSource(map, 'diff-gueteklassen', feedGueteklassenToGeoJSON(gueteklassen));
+    setSplitGueteklassenSummary(side === 'old' ? 'a' : 'b', gueteklassen.summary);
+  }, [gueteklassen, analysisMode, ready, side, setSplitGueteklassenSummary]);
 
   // This pane's stops, at this feed's positions, at whatever the network
   // shows: this map isn't scoped to the run of a route, and there are no
@@ -558,6 +604,8 @@ export function SplitMapView({ diffedShapes }: { diffedShapes: DiffedShapes | nu
             <FrequencyLegend />
           ) : analysisMode === 'population' ? (
             <PopulationLegend />
+          ) : analysisMode === 'gueteklassen' ? (
+            <GueteklassenLegend />
           ) : (
             legendItems.map(({ id, label }) => (
               <label key={id} className={`diff-count ${diffSegmentVisibility[id] ? 'on' : 'off'}`}>
@@ -571,7 +619,7 @@ export function SplitMapView({ diffedShapes }: { diffedShapes: DiffedShapes | nu
               </label>
             ))
           )}
-          {analysisMode !== 'frequency' && STOP_LEGEND.map(({ id, label }) => (
+          {analysisMode === 'none' && STOP_LEGEND.map(({ id, label }) => (
             <label key={id} className={`diff-count ${diffStopVisibility[id] ? 'on' : 'off'}`}>
               <input
                 type="checkbox"
@@ -582,7 +630,7 @@ export function SplitMapView({ diffedShapes }: { diffedShapes: DiffedShapes | nu
               <span className="diff-count-label">{label}</span>
             </label>
           ))}
-          {analysisMode !== 'frequency' && (
+          {analysisMode === 'none' && (
             <label className={`diff-count ${diffStopLabels ? 'on' : 'off'}`}>
               <input type="checkbox" checked={diffStopLabels} onChange={toggleDiffStopLabels} />
               <span className="diff-count-swatch diff-count-swatch--label">A</span>

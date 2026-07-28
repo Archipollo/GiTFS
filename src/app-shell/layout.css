@@ -923,6 +923,10 @@
   font-size: 10.5px;
   line-height: 1.35;
 }
+.frequency-legend-header {
+  font-size: 11.5px;
+  font-weight: 600;
+}
 .frequency-legend-toggle {
   display: flex;
   align-items: center;

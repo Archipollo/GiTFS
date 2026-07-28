@@ -18,7 +18,8 @@ import {
   FREQUENCY_NEUTRAL_COLOR,
   FREQUENCY_SMALL_GAIN_COLOR,
   FREQUENCY_BIG_GAIN_COLOR,
-  FREQUENCY_CLASS_BREAKS,
+  FREQUENCY_RELATIVE_CLASS_BREAKS,
+  FREQUENCY_ABSOLUTE_CLASS_BREAKS,
 } from './frequency';
 import {
   FEED_FREQUENCY_LOWEST_COLOR,
@@ -34,6 +35,10 @@ function fmt(n: number): string {
   // No thousands grouping — `toLocaleString()` inserts a locale-dependent
   // separator (a space in some locales), which reads as two numbers.
   return String(Math.round(n));
+}
+
+function fmtPct(n: number): string {
+  return String(Math.round(n * 100));
 }
 
 function StationsSection() {
@@ -107,18 +112,33 @@ export function FrequencyLegend() {
   const feedSummary = useAppStore((s) => s.feedFrequencySummary);
   const frequencyIncludeAddedRemoved = useAppStore((s) => s.frequencyIncludeAddedRemoved);
   const setFrequencyIncludeAddedRemoved = useAppStore((s) => s.setFrequencyIncludeAddedRemoved);
+  const frequencyClassMode = useAppStore((s) => s.frequencyClassMode);
+  const setFrequencyClassMode = useAppStore((s) => s.setFrequencyClassMode);
 
   if (diffSummary) {
-    const { scaleAbsDelta, maxAbsDelta } = diffSummary;
-    const capped = maxAbsDelta > scaleAbsDelta;
-    const [b0, b1, b2, b3] = FREQUENCY_CLASS_BREAKS.map((f) => f * scaleAbsDelta);
-    const classes = [
-      { color: FREQUENCY_BIG_LOSS_COLOR, label: `≤ −${fmt(-b0)}/wk` },
-      { color: FREQUENCY_SMALL_LOSS_COLOR, label: `−${fmt(-b0)} to −${fmt(-b1)}/wk` },
-      { color: FREQUENCY_NEUTRAL_COLOR, label: `−${fmt(-b1)} to +${fmt(b2)}/wk` },
-      { color: FREQUENCY_SMALL_GAIN_COLOR, label: `+${fmt(b2)} to +${fmt(b3)}/wk` },
-      { color: FREQUENCY_BIG_GAIN_COLOR, label: `≥ +${fmt(b3)}/wk` },
-    ];
+    const { maxAbsDelta } = diffSummary;
+    const classes =
+      frequencyClassMode === 'relative'
+        ? (() => {
+            const [b0, b1, b2, b3] = FREQUENCY_RELATIVE_CLASS_BREAKS;
+            return [
+              { color: FREQUENCY_BIG_LOSS_COLOR, label: `≤ −${fmtPct(-b0)}%` },
+              { color: FREQUENCY_SMALL_LOSS_COLOR, label: `−${fmtPct(-b0)}% to −${fmtPct(-b1)}%` },
+              { color: FREQUENCY_NEUTRAL_COLOR, label: `−${fmtPct(-b1)}% to +${fmtPct(b2)}%` },
+              { color: FREQUENCY_SMALL_GAIN_COLOR, label: `+${fmtPct(b2)}% to +${fmtPct(b3)}%` },
+              { color: FREQUENCY_BIG_GAIN_COLOR, label: `≥ +${fmtPct(b3)}%` },
+            ];
+          })()
+        : (() => {
+            const [b0, b1, b2, b3] = FREQUENCY_ABSOLUTE_CLASS_BREAKS;
+            return [
+              { color: FREQUENCY_BIG_LOSS_COLOR, label: `≤ −${fmt(-b0)}/wk` },
+              { color: FREQUENCY_SMALL_LOSS_COLOR, label: `−${fmt(-b0)} to −${fmt(-b1)}/wk` },
+              { color: FREQUENCY_NEUTRAL_COLOR, label: `−${fmt(-b1)} to +${fmt(b2)}/wk` },
+              { color: FREQUENCY_SMALL_GAIN_COLOR, label: `+${fmt(b2)} to +${fmt(b3)}/wk` },
+              { color: FREQUENCY_BIG_GAIN_COLOR, label: `≥ +${fmt(b3)}/wk` },
+            ];
+          })();
     return (
       <div className="frequency-legend">
         <div className="frequency-legend-classes">
@@ -137,9 +157,17 @@ export function FrequencyLegend() {
           />
           Include added/removed lines
         </label>
+        <label className="frequency-legend-toggle">
+          <input
+            type="checkbox"
+            checked={frequencyClassMode === 'absolute'}
+            onChange={(e) => setFrequencyClassMode(e.target.checked ? 'absolute' : 'relative')}
+          />
+          Classify by absolute trips/week (instead of % change)
+        </label>
         <div className="muted frequency-legend-caption">
           Trips/week gained or lost - line width also scales with the size of the change
-          {capped && ` (classes capped at the 95th percentile; largest change is ${fmt(maxAbsDelta)}/wk)`}
+          {` (largest change is ${fmt(maxAbsDelta)}/wk)`}
         </div>
         <StationsSection />
       </div>
@@ -147,9 +175,8 @@ export function FrequencyLegend() {
   }
 
   if (feedSummary) {
-    const { scaleWeeklyTrips, maxWeeklyTrips } = feedSummary;
-    const capped = maxWeeklyTrips > scaleWeeklyTrips;
-    const [b0, b1, b2, b3] = FEED_FREQUENCY_CLASS_BREAKS.map((f) => f * scaleWeeklyTrips);
+    const { maxWeeklyTrips } = feedSummary;
+    const [b0, b1, b2, b3] = FEED_FREQUENCY_CLASS_BREAKS;
     const classes = [
       { color: FEED_FREQUENCY_LOWEST_COLOR, label: `0 to ${fmt(b0)}/wk` },
       { color: FEED_FREQUENCY_LOW_COLOR, label: `${fmt(b0)} to ${fmt(b1)}/wk` },
@@ -169,7 +196,7 @@ export function FrequencyLegend() {
         </div>
         <div className="muted frequency-legend-caption">
           Trips/week per line · line width also scales with frequency
-          {capped && ` (classes capped at the 95th percentile; busiest line runs ${fmt(maxWeeklyTrips)}/wk)`}
+          {` (busiest line runs ${fmt(maxWeeklyTrips)}/wk)`}
         </div>
         <FeedStationsSection />
       </div>

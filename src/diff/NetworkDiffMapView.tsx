@@ -23,8 +23,15 @@ import {
   type PopulationDiffResult,
 } from './population';
 import { getOrComputeZaehlsprengelPopulation, type ZaehlsprengelResult } from '../gtfs/zaehlsprengel';
+import {
+  getOrComputeGueteklassenDiff,
+  gueteklassenChangeToGeoJSON,
+  summarizeGueteklassenChange,
+  type GueteklassenDiffResult,
+} from './gueteklassen';
 import { FrequencyLegend } from './FrequencyLegend';
 import { PopulationLegend } from './PopulationLegend';
+import { GueteklassenLegend } from './GueteklassenLegend';
 import { yearOfFeed } from '../timeline/math';
 import { BasemapControls } from '../map/BasemapControls';
 import { useBasemap } from '../map/basemap';
@@ -36,8 +43,13 @@ import {
   addDiffSegmentLayers,
   addDiffStopLayers,
   addDiffFrequencyLayers,
+  frequencyColorExpr,
   addDiffPopulationLayers,
+  populationColorExpr,
+  populationOpacityExpr,
+  addDiffGueteklassenChangeLayers,
   attachPopulationTooltip,
+  attachGueteklassenTooltip,
   attachDiffSegmentClickHandler,
   attachDiffFrequencyClickHandler,
   attachDiffStopClickHandler,
@@ -73,9 +85,12 @@ export function NetworkDiffMapView({ diffedShapes }: { diffedShapes: DiffedShape
   const analysisMode = useAppStore((s) => s.analysisMode);
   const setDiffFrequencySummary = useAppStore((s) => s.setDiffFrequencySummary);
   const frequencyIncludeAddedRemoved = useAppStore((s) => s.frequencyIncludeAddedRemoved);
+  const frequencyClassMode = useAppStore((s) => s.frequencyClassMode);
+  const populationClassMode = useAppStore((s) => s.populationClassMode);
   const setDiffPopulationSummary = useAppStore((s) => s.setDiffPopulationSummary);
   const populationSource = useAppStore((s) => s.populationSource);
   const setZaehlsprengelPopulationSummary = useAppStore((s) => s.setZaehlsprengelPopulationSummary);
+  const setDiffGueteklassenSummary = useAppStore((s) => s.setDiffGueteklassenSummary);
   // Stop-diff shares the same cached (A,B) result the detail view already
   // computed — `useDiff` hits `peekDiff`, so this second caller adds no worker
   // work for a pair that's already been diffed.
@@ -135,12 +150,14 @@ export function NetworkDiffMapView({ diffedShapes }: { diffedShapes: DiffedShape
     map.on('load', () => {
       // Added first so the fill sits at the very bottom of the diff stack,
       // under the segment/stop layers added below.
-      addDiffPopulationLayers(map);
+      addDiffPopulationLayers(map, useAppStore.getState().populationClassMode);
       attachPopulationTooltip(map, 'diff-population-fill');
+      addDiffGueteklassenChangeLayers(map);
+      attachGueteklassenTooltip(map, 'diff-gueteklassen-change-fill');
       addDiffSegmentLayers(map);
       // Network overview: labels only once the user zooms into an area.
       addDiffStopLayers(map, { labelMinZoom: 12 });
-      addDiffFrequencyLayers(map);
+      addDiffFrequencyLayers(map, useAppStore.getState().frequencyClassMode);
       attachDiffSegmentClickHandler(map, setDiffRouteFocus);
       attachDiffFrequencyClickHandler(map, setDiffRouteFocus);
       attachDiffStopClickHandler(map, setDiffStopFocus);
@@ -214,6 +231,7 @@ export function NetworkDiffMapView({ diffedShapes }: { diffedShapes: DiffedShape
     }
     const filtered = filterFrequencyDiff(frequency, frequencyIncludeAddedRemoved);
     setSource(map, 'diff-frequency', frequencyDiffToGeoJSON(filtered));
+    map.setPaintProperty('diff-frequency-line', 'line-color', frequencyColorExpr(frequencyClassMode));
     setDiffFrequencySummary({
       feedA: filtered.feedA,
       feedB: filtered.feedB,
@@ -221,7 +239,7 @@ export function NetworkDiffMapView({ diffedShapes }: { diffedShapes: DiffedShape
       scaleAbsDelta: filtered.scaleAbsDelta,
       routeCount: filtered.entries.length,
     });
-  }, [frequency, analysisMode, ready, frequencyIncludeAddedRemoved, setDiffFrequencySummary]);
+  }, [frequency, analysisMode, ready, frequencyIncludeAddedRemoved, frequencyClassMode, setDiffFrequencySummary]);
 
   // Population-diff overlay — a fill layer, so unlike frequency it doesn't
   // need to empty `diff-segments`; routes/stops stay visible on top of it.
@@ -257,6 +275,8 @@ export function NetworkDiffMapView({ diffedShapes }: { diffedShapes: DiffedShape
       return;
     }
     setSource(map, 'diff-population', populationDiffToGeoJSON(population));
+    map.setPaintProperty('diff-population-fill', 'fill-color', populationColorExpr(populationClassMode));
+    map.setPaintProperty('diff-population-fill', 'fill-opacity', populationOpacityExpr(populationClassMode));
     setDiffPopulationSummary({
       feedA: population.feedA,
       feedB: population.feedB,
@@ -268,8 +288,9 @@ export function NetworkDiffMapView({ diffedShapes }: { diffedShapes: DiffedShape
       maxPopulation: population.maxPopulation,
       scalePopulation: population.scalePopulation,
       cellCount: population.cellCount,
+      cellSizeMeters: population.cellSizeMeters,
     });
-  }, [population, analysisMode, populationSource, ready, setDiffPopulationSummary]);
+  }, [population, analysisMode, populationSource, ready, populationClassMode, setDiffPopulationSummary]);
 
   // Zählsprengel source — same 'diff-population' fill layer, no per-feed-year
   // diff (see gtfs/zaehlsprengel.ts): just the current registry snapshot.
@@ -298,6 +319,34 @@ export function NetworkDiffMapView({ diffedShapes }: { diffedShapes: DiffedShape
     setSource(map, 'diff-population', zaehlsprengelPopulation.geojson);
     setZaehlsprengelPopulationSummary(zaehlsprengelPopulation.summary);
   }, [zaehlsprengelPopulation, analysisMode, populationSource, ready, setZaehlsprengelPopulationSummary]);
+
+  // ÖV-Güteklassen categorical change layer — the network-diff overview's
+  // representation of an ordinal (A-G) grade that can't be subtracted like
+  // population's numeric density (see diff/gueteklassen.ts).
+  const [gueteklassenDiff, setGueteklassenDiff] = useState<GueteklassenDiffResult | null>(null);
+  useEffect(() => {
+    if (analysisMode !== 'gueteklassen' || !diffedShapes || !populationBounds) {
+      setGueteklassenDiff(null);
+      return;
+    }
+    let cancelled = false;
+    getOrComputeGueteklassenDiff(diffedShapes.feedA, diffedShapes.feedB, populationBounds)
+      .then((r) => { if (!cancelled) setGueteklassenDiff(r); })
+      .catch((err) => console.warn('network gueteklassen compute failed', err));
+    return () => { cancelled = true; };
+  }, [analysisMode, diffedShapes, populationBounds]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    if (!gueteklassenDiff || analysisMode !== 'gueteklassen') {
+      setDiffGueteklassenSummary(null);
+      setSource(map, 'diff-gueteklassen-change', emptyFC());
+      return;
+    }
+    setSource(map, 'diff-gueteklassen-change', gueteklassenChangeToGeoJSON(gueteklassenDiff));
+    setDiffGueteklassenSummary(summarizeGueteklassenChange(gueteklassenDiff));
+  }, [gueteklassenDiff, analysisMode, ready, setDiffGueteklassenSummary]);
 
   // Stop-diff dots for the whole network. Unlike RouteDetailView these aren't
   // filtered to a single route — every changed stop is shown. `unchanged` is
@@ -405,6 +454,8 @@ export function NetworkDiffMapView({ diffedShapes }: { diffedShapes: DiffedShape
             <FrequencyLegend />
           ) : analysisMode === 'population' ? (
             <PopulationLegend />
+          ) : analysisMode === 'gueteklassen' ? (
+            <GueteklassenLegend />
           ) : (
             legendItems.map(({ id, label }) => (
               <label key={id} className={`diff-count ${diffSegmentVisibility[id] ? 'on' : 'off'}`}>
@@ -418,7 +469,7 @@ export function NetworkDiffMapView({ diffedShapes }: { diffedShapes: DiffedShape
               </label>
             ))
           )}
-          {analysisMode !== 'frequency' && STOP_LEGEND.map(({ id, label }) => (
+          {analysisMode === 'none' && STOP_LEGEND.map(({ id, label }) => (
             <label key={id} className={`diff-count ${diffStopVisibility[id] ? 'on' : 'off'}`}>
               <input
                 type="checkbox"
@@ -429,7 +480,7 @@ export function NetworkDiffMapView({ diffedShapes }: { diffedShapes: DiffedShape
               <span className="diff-count-label">{label}</span>
             </label>
           ))}
-          {analysisMode !== 'frequency' && (
+          {analysisMode === 'none' && (
             <label className={`diff-count ${diffStopLabels ? 'on' : 'off'}`}>
               <input type="checkbox" checked={diffStopLabels} onChange={toggleDiffStopLabels} />
               <span className="diff-count-swatch diff-count-swatch--label">A</span>

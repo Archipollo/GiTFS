@@ -105,10 +105,12 @@ export const FEED_FREQUENCY_HIGH_COLOR = '#60a5fa';
 export const FEED_FREQUENCY_HIGHEST_COLOR = '#1e3a8a';
 
 /**
- * Break points on `trips_norm` ([0, 1], trips/week scaled by
- * `scaleWeeklyTrips`) separating the 5 equal-width classes.
+ * Break points on raw `trips_per_week`, fixed rather than percentile-scaled
+ * so a route's class doesn't shift when the rest of the feed's frequencies
+ * change: roughly peak-only/rare, hourly-ish, 20-40 min headway, 15-20 min
+ * headway, and sub-10-min headway.
  */
-export const FEED_FREQUENCY_CLASS_BREAKS: readonly [number, number, number, number] = [0.2, 0.4, 0.6, 0.8];
+export const FEED_FREQUENCY_CLASS_BREAKS: readonly [number, number, number, number] = [50, 150, 400, 800];
 
 export const FEED_FREQUENCY_MIN_WIDTH = 1.2;
 export const FEED_FREQUENCY_MAX_WIDTH = 4;

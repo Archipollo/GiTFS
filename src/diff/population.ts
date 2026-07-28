@@ -11,9 +11,13 @@
 import {
   populationYearFor,
   getOrFetchPopulationGrid,
+  cellAreaHectares,
+  rowCenterLat,
   type Bbox,
   type PopulationGrid,
 } from '../gtfs/population';
+
+const METERS_PER_DEG_LAT = 111_320;
 import type { DiffedShapes } from '../gtfs/segment-graph';
 
 export interface PopulationDiffResult {
@@ -41,18 +45,27 @@ export interface PopulationDiffResult {
    * of just the bare change. Only populated when `mode === 'delta'`. */
   populationA: Float32Array;
   populationB: Float32Array;
+  /** People/hectare, not raw people — see `cellAreaHectares`. */
   maxAbsDelta: number;
-  /** |delta| at which colour maxes out — the 95th-percentile |delta|, not the
-   * maximum, mirroring `scaleAbsDelta` in diff/frequency.ts. */
+  /** |delta density| at which colour maxes out — the 95th-percentile
+   * |delta| (people/hectare), not the maximum, mirroring `scaleAbsDelta` in
+   * diff/frequency.ts. */
   scaleAbsDelta: number;
   /** Row-major absolute population, same indexing as `grid.values`. Only
    * populated when `mode === 'absolute'`. */
   population: Float32Array;
+  /** People/hectare, not raw people — see `cellAreaHectares`. Populated in
+   * both modes: `'absolute'` mode's own density, or (in `'delta'` mode)
+   * feed B's density, for the "show density instead of change" toggle. */
   maxPopulation: number;
-  /** Population at which colour maxes out — the 95th-percentile cell
-   * population, mirroring `scalePopulation` in gtfs/population.ts. */
+  /** Density at which colour maxes out — the 95th-percentile cell density
+   * (people/hectare), mirroring `scalePopulation` in gtfs/population.ts.
+   * Populated in both modes — see `maxPopulation`. */
   scalePopulation: number;
   cellCount: number;
+  /** Cell size in meters (north-south edge) at the tile-pyramid level the
+   * underlying grid resolved to — for the legend caption. */
+  cellSizeMeters: number;
 }
 
 function summarizeAbsDeltas(deltas: readonly number[]): { maxAbsDelta: number; scaleAbsDelta: number } {
@@ -92,7 +105,13 @@ function getOrComputeAbsoluteReferenceScale(year: number, scaleBbox: Bbox): Prom
   if (hit) return hit;
   const p = getOrFetchPopulationGrid(year, scaleBbox).then((grid) => {
     const nonZero: number[] = [];
-    for (const v of grid.values) if (v > 0) nonZero.push(v);
+    for (let row = 0; row < grid.rows; row++) {
+      const area = cellAreaHectares(grid.cellSizeX, grid.cellSizeY, rowCenterLat(grid, row));
+      for (let col = 0; col < grid.cols; col++) {
+        const v = grid.values[row * grid.cols + col];
+        if (v > 0) nonZero.push(v / area);
+      }
+    }
     return summarizeValues(nonZero);
   });
   referenceScaleCacheAbsolute.set(key, p);
@@ -115,9 +134,10 @@ function getOrComputeDeltaReferenceScale(
     const rows = Math.min(gridA.rows, gridB.rows);
     const deltas: number[] = [];
     for (let row = 0; row < rows; row++) {
+      const area = cellAreaHectares(gridB.cellSizeX, gridB.cellSizeY, rowCenterLat(gridB, row));
       for (let col = 0; col < cols; col++) {
         const d = gridB.values[row * gridB.cols + col] - gridA.values[row * gridA.cols + col];
-        if (d !== 0) deltas.push(d);
+        if (d !== 0) deltas.push(d / area);
       }
     }
     return summarizeAbsDeltas(deltas);
@@ -173,6 +193,7 @@ export async function computePopulationDiff(
       maxPopulation,
       scalePopulation,
       cellCount,
+      cellSizeMeters: Math.round(gridB.cellSizeY * METERS_PER_DEG_LAT),
     };
   }
 
@@ -180,6 +201,10 @@ export async function computePopulationDiff(
     getOrFetchPopulationGrid(yearA, bbox),
     getOrFetchPopulationGrid(yearB, bbox),
   ]);
+  // Also fetch feed B's absolute density scale — not used for the delta
+  // ramp, but needed so a "show density instead of change" toggle (see
+  // `PopulationClassMode`) has a reference scale to classify against.
+  const { max: maxPopulation, scale: scalePopulation } = await getOrComputeAbsoluteReferenceScale(yearB, scaleBbox);
 
   // Both requests share the same bbox and decimation cap, so they resolve to
   // the same window/grid shape — but guard against a mismatch (e.g. one grid
@@ -218,9 +243,10 @@ export async function computePopulationDiff(
     maxAbsDelta,
     scaleAbsDelta,
     population: new Float32Array(0),
-    maxPopulation: 0,
-    scalePopulation: 0,
+    maxPopulation,
+    scalePopulation,
     cellCount,
+    cellSizeMeters: Math.round(gridA.cellSizeY * METERS_PER_DEG_LAT),
   };
 }
 
@@ -289,25 +315,42 @@ export const POPULATION_SMALL_GAIN_COLOR = '#4ade80';
 export const POPULATION_BIG_GAIN_COLOR = '#166534';
 
 /**
- * Break points on raw `pop_delta` (people, not a percentile-scaled ratio) —
- * fixed thresholds rather than `scaleAbsDelta`-relative ones, so a ±5 wobble
- * in a handful of cells doesn't count as a "big" change just because the
- * network-wide p95 happens to be small; only genuinely notable shifts (double
- * digits) fall outside the neutral band.
+ * Break points on `pop_delta_density` (people/hectare, not a
+ * percentile-scaled ratio) — fixed thresholds rather than
+ * `scaleAbsDelta`-relative ones, so a ±5 wobble in a handful of cells
+ * doesn't count as a "big" change just because the network-wide p95 happens
+ * to be small; only genuinely notable shifts (double digits) fall outside
+ * the neutral band. Density, not raw per-cell people, so the same numbers
+ * mean the same thing whether the grid is currently rendering ~100m native
+ * cells or coarser tile-pyramid cells (see `cellAreaHectares`) — a native
+ * GHS-POP cell is close to 1 hectare, so these values read about the same
+ * as the old raw-people breaks at native zoom.
  */
 export const POPULATION_DIFF_CLASS_BREAKS: readonly [number, number, number, number] = [-25, -10, 10, 25];
 
 export const POPULATION_DIFF_FILL_OPACITY = 0.6;
 
+/**
+ * `'change'` (default) colours cells by loss/gain (`pop_delta_density`) —
+ * today's behaviour. `'density'` colours by feed B's absolute density
+ * (`pop_norm`) instead, so a viewer can see where the network area is
+ * generally dense or sparse without leaving diff mode. Mirrors
+ * `FrequencyClassMode` in `frequency.ts`.
+ */
+export type PopulationClassMode = 'change' | 'density';
+
 // ---- GeoJSON ------------------------------------------------------------
 
 /**
  * One square-cell Polygon per grid cell. In `'delta'` mode, zero-delta cells
- * are skipped and each feature carries `pop_delta` (raw people, fixed
- * absolute breaks — see `POPULATION_DIFF_CLASS_BREAKS`). In `'absolute'`
- * mode (feed A and B share a GHS-POP year), empty
- * cells are skipped instead and each feature carries `population`/`pop_norm`
- * (sequential scale) — the same shape `feedPopulationToGeoJSON` in
+ * are skipped and each feature carries `pop_delta` (raw people, for the
+ * tooltip) and `pop_delta_density` (people/hectare — what the fixed
+ * absolute breaks in `POPULATION_DIFF_CLASS_BREAKS` actually classify,
+ * since raw per-cell people isn't comparable across the tile-pyramid's
+ * varying cell sizes; see `cellAreaHectares`). In `'absolute'` mode (feed A
+ * and B share a GHS-POP year), empty cells are skipped instead and each
+ * feature carries `population`/`pop_norm` (sequential scale, `pop_norm`
+ * likewise density-based) — the same shape `feedPopulationToGeoJSON` in
  * gtfs/population.ts produces for the single-feed view.
  */
 export function populationDiffToGeoJSON(result: PopulationDiffResult): GeoJSON.FeatureCollection {
@@ -325,31 +368,45 @@ export function populationDiffToGeoJSON(result: PopulationDiffResult): GeoJSON.F
   if (result.mode === 'absolute') {
     const scale = result.scalePopulation > 0 ? result.scalePopulation : 1;
     for (let row = 0; row < grid.rows; row++) {
+      const area = cellAreaHectares(grid.cellSizeX, grid.cellSizeY, rowCenterLat(grid, row));
       for (let col = 0; col < grid.cols; col++) {
         const value = result.population[row * grid.cols + col];
         if (value <= 0) continue;
+        const density = value / area;
         features.push({
           type: 'Feature',
           geometry: cellPolygon(row, col),
-          properties: { population: value, pop_norm: Math.max(0, Math.min(1, value / scale)) },
+          properties: { population: value, pop_norm: Math.max(0, Math.min(1, density / scale)) },
         });
       }
     }
     return { type: 'FeatureCollection', features };
   }
 
+  const densityScale = result.scalePopulation > 0 ? result.scalePopulation : 1;
   for (let row = 0; row < grid.rows; row++) {
+    const area = cellAreaHectares(grid.cellSizeX, grid.cellSizeY, rowCenterLat(grid, row));
     for (let col = 0; col < grid.cols; col++) {
       const idx = row * grid.cols + col;
       const delta = result.deltas[idx];
-      if (delta === 0) continue;
+      const a = result.populationA[idx];
+      const b = result.populationB[idx];
+      // Keep populated-but-unchanged cells too (not just delta !== 0) — the
+      // density toggle needs full coverage of feed B's populated area, not
+      // just the cells that happened to change.
+      if (delta === 0 && b <= 0) continue;
+      const densityB = b / area;
       features.push({
         type: 'Feature',
         geometry: cellPolygon(row, col),
         properties: {
           pop_delta: delta,
-          population_a: result.populationA[idx],
-          population_b: result.populationB[idx],
+          pop_delta_density: delta / area,
+          population_a: a,
+          population_b: b,
+          pop_density_a: a / area,
+          pop_density_b: densityB,
+          pop_norm: Math.max(0, Math.min(1, densityB / densityScale)),
         },
       });
     }

@@ -3,6 +3,7 @@
 // over re-ingesting the raw zip (slow).
 
 import { getDuckDB, getConnection } from './duckdb';
+import { columnExists } from './queries';
 import {
   listPersistedFeedIds,
   getMeta,
@@ -49,6 +50,25 @@ async function loadFeed(feedId: string): Promise<void> {
     if (stems.length > 0 && missing.length === 0) {
       setMapTaskLabel(taskId, `Restoring ${label} (parquet)…`);
       await loadFromParquet(feedId, stems);
+      // Parquet shards persisted before `departure_time` was added to
+      // stop_times' ingest projection (see ingest.ts) predate the
+      // ÖV-Güteklassen layer's needs — restoring them silently leaves that
+      // column missing forever. Detect the stale schema and, if the raw zip
+      // is still around, re-ingest to backfill both the DuckDB table and the
+      // persisted Parquet shard.
+      if (stems.includes('stop_times') && !(await stopTimesHasDepartureTime(feedId))) {
+        const raw = await getRaw(feedId);
+        if (raw) {
+          setMapTaskLabel(taskId, `Upgrading ${label}…`);
+          const { ingestGtfsZip } = await import('./ingest');
+          await ingestGtfsZip(withOriginalName(raw, feeds[feedId]), {
+            reuseId: feedId,
+            skipStore: true,
+            persistRaw: false,
+            persistParquet: true,
+          });
+        }
+      }
       loaded.add(feedId);
       return;
     }
@@ -62,7 +82,7 @@ async function loadFeed(feedId: string): Promise<void> {
       setMapTaskLabel(taskId, `Re-ingesting ${label} from zip…`);
       // Lazy import to avoid an ingest <-> feed-loader cycle at module load time.
       const { ingestGtfsZip } = await import('./ingest');
-      await ingestGtfsZip(raw, {
+      await ingestGtfsZip(withOriginalName(raw, feeds[feedId]), {
         reuseId: feedId,
         skipStore: true,
         persistRaw: false,
@@ -80,6 +100,26 @@ async function loadFeed(feedId: string): Promise<void> {
     throw new Error(`Feed ${feedId} has no persisted Parquet shards or raw zip`);
   } finally {
     endMapTask(taskId);
+  }
+}
+
+// OPFS always persists the raw zip under the literal filename `raw.zip` (see
+// opfs.ts putRaw/getRaw), so the File handed back here has lost the feed's
+// original filename. ingestGtfsZip derives label/sourceName from File.name,
+// so re-ingesting from this blob directly would rename the feed to "raw"
+// everywhere (dropdowns, tooltips, persisted meta). Restore the original name
+// before handing the file to ingestGtfsZip.
+function withOriginalName(raw: File, meta: FeedMeta | undefined): File {
+  if (!meta?.sourceName || raw.name === meta.sourceName) return raw;
+  return new File([raw], meta.sourceName, { type: raw.type });
+}
+
+async function stopTimesHasDepartureTime(feedId: string): Promise<boolean> {
+  const conn = await getConnection();
+  try {
+    return await columnExists(conn, feedId, 'stop_times', 'departure_time');
+  } finally {
+    await conn.close();
   }
 }
 

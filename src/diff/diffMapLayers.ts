@@ -16,7 +16,9 @@ import {
   FREQUENCY_NEUTRAL_COLOR,
   FREQUENCY_SMALL_GAIN_COLOR,
   FREQUENCY_BIG_GAIN_COLOR,
-  FREQUENCY_CLASS_BREAKS,
+  FREQUENCY_RELATIVE_CLASS_BREAKS,
+  FREQUENCY_ABSOLUTE_CLASS_BREAKS,
+  type FrequencyClassMode,
 } from './frequency';
 import {
   POPULATION_BIG_LOSS_COLOR,
@@ -26,6 +28,7 @@ import {
   POPULATION_BIG_GAIN_COLOR,
   POPULATION_DIFF_CLASS_BREAKS,
   POPULATION_DIFF_FILL_OPACITY,
+  type PopulationClassMode,
 } from './population';
 import {
   POPULATION_LOWEST_COLOR,
@@ -36,6 +39,8 @@ import {
   POPULATION_CLASS_BREAKS,
   POPULATION_FILL_OPACITY,
 } from '../gtfs/population';
+import { GUTEKLASSE_COLOR, GUTEKLASSEN_FILL_OPACITY, GUTEKLASSE_LETTER } from '../gtfs/gueteklassen';
+import { GUETEKLASSEN_CHANGE_COLOR } from './gueteklassen';
 
 /** First layer added by `addDiffSegmentLayers` — the anchor a dynamically
  * inserted basemap (historical satellite) must slot in *below*. This is the
@@ -778,17 +783,30 @@ export function addDiffStopLayers(
   });
 }
 
-/** Frequency overlay source + layers, scoped to whatever features the caller passes in. */
-export function addDiffFrequencyLayers(map: MapLibreMap): void {
-  map.addSource('diff-frequency', { type: 'geojson', data: emptyFC() });
-  const colorExpr: maplibregl.ExpressionSpecification = [
-    'step', ['get', 'delta_norm'],
+/**
+ * Fixed-break color expression for the frequency diff line layer. Relative
+ * mode classifies `percent_delta` (delta as a fraction of the route's
+ * baseline); absolute mode classifies raw `delta` (trips/week). Both sets of
+ * breaks are constants (see `frequency.ts`), so switching modes or toggling
+ * "include added/removed lines" never shifts the class boundaries themselves.
+ */
+export function frequencyColorExpr(mode: FrequencyClassMode): maplibregl.ExpressionSpecification {
+  const breaks = mode === 'relative' ? FREQUENCY_RELATIVE_CLASS_BREAKS : FREQUENCY_ABSOLUTE_CLASS_BREAKS;
+  const property = mode === 'relative' ? 'percent_delta' : 'delta';
+  return [
+    'step', ['get', property],
     FREQUENCY_BIG_LOSS_COLOR,
-    FREQUENCY_CLASS_BREAKS[0], FREQUENCY_SMALL_LOSS_COLOR,
-    FREQUENCY_CLASS_BREAKS[1], FREQUENCY_NEUTRAL_COLOR,
-    FREQUENCY_CLASS_BREAKS[2], FREQUENCY_SMALL_GAIN_COLOR,
-    FREQUENCY_CLASS_BREAKS[3], FREQUENCY_BIG_GAIN_COLOR,
+    breaks[0], FREQUENCY_SMALL_LOSS_COLOR,
+    breaks[1], FREQUENCY_NEUTRAL_COLOR,
+    breaks[2], FREQUENCY_SMALL_GAIN_COLOR,
+    breaks[3], FREQUENCY_BIG_GAIN_COLOR,
   ];
+}
+
+/** Frequency overlay source + layers, scoped to whatever features the caller passes in. */
+export function addDiffFrequencyLayers(map: MapLibreMap, classMode: FrequencyClassMode): void {
+  map.addSource('diff-frequency', { type: 'geojson', data: emptyFC() });
+  const colorExpr = frequencyColorExpr(classMode);
   // Width now also encodes the *size* of the change (not just zoom): a route
   // near zero delta renders near the thin end regardless of zoom, while one
   // at or beyond the p95 cap renders near the thick end — so "how much more
@@ -840,42 +858,64 @@ export function addDiffFrequencyLayers(map: MapLibreMap): void {
  * instead of being obscured by it.
  *
  * Feeds features in two shapes depending on `PopulationDiffResult.mode`
- * (see population.ts): `pop_delta` (diverging loss/gain, fixed absolute
- * breaks) when feed A and B resolve to different GHS-POP years, or `pop_norm`
- * (sequential density — more people, darker fill) when they share a year and
- * a delta would be all zeros. Both properties never co-occur on the same
- * feature, so `has` picks
+ * (see population.ts): `pop_delta_density` (diverging loss/gain in
+ * people/hectare, fixed absolute breaks) when feed A and B resolve to
+ * different GHS-POP years, or `pop_norm` (sequential density — more people,
+ * darker fill) when they share a year and a delta would be all zeros. Both
+ * properties never co-occur on the same feature, so `has` picks
  * the ramp per-feature (in practice uniform across a whole render, since one
  * `PopulationDiffResult` is all one mode).
  */
-export function addDiffPopulationLayers(map: MapLibreMap): void {
+const POPULATION_DENSITY_STEP_EXPR: maplibregl.ExpressionSpecification = [
+  'step', ['get', 'pop_norm'],
+  POPULATION_LOWEST_COLOR,
+  POPULATION_CLASS_BREAKS[0], POPULATION_LOW_COLOR,
+  POPULATION_CLASS_BREAKS[1], POPULATION_MID_COLOR,
+  POPULATION_CLASS_BREAKS[2], POPULATION_HIGH_COLOR,
+  POPULATION_CLASS_BREAKS[3], POPULATION_HIGHEST_COLOR,
+];
+
+const POPULATION_CHANGE_STEP_EXPR: maplibregl.ExpressionSpecification = [
+  'step', ['get', 'pop_delta_density'],
+  POPULATION_BIG_LOSS_COLOR,
+  POPULATION_DIFF_CLASS_BREAKS[0], POPULATION_SMALL_LOSS_COLOR,
+  POPULATION_DIFF_CLASS_BREAKS[1], POPULATION_NEUTRAL_COLOR,
+  POPULATION_DIFF_CLASS_BREAKS[2], POPULATION_SMALL_GAIN_COLOR,
+  POPULATION_DIFF_CLASS_BREAKS[3], POPULATION_BIG_GAIN_COLOR,
+];
+
+/**
+ * Fixed-break color expression for the population fill layer, mirroring
+ * `frequencyColorExpr`. `'density'` always uses the sequential density ramp
+ * (`pop_norm` — present on every feature regardless of mode, see
+ * `populationDiffToGeoJSON`/`feedPopulationToGeoJSON`). `'change'` uses the
+ * diverging loss/gain ramp (`pop_delta_density`) when present, falling back
+ * to the density ramp for same-GHS-POP-year cells where a delta would be
+ * all zeros.
+ */
+export function populationColorExpr(classMode: PopulationClassMode): maplibregl.ExpressionSpecification {
+  if (classMode === 'density') return POPULATION_DENSITY_STEP_EXPR;
+  return ['case', ['has', 'pop_delta_density'], POPULATION_CHANGE_STEP_EXPR, POPULATION_DENSITY_STEP_EXPR];
+}
+
+/** Opacity companion to `populationColorExpr` — the diverging change ramp
+ * reads better a bit more translucent than the sequential density ramp. */
+export function populationOpacityExpr(
+  classMode: PopulationClassMode,
+): number | maplibregl.ExpressionSpecification {
+  if (classMode === 'density') return POPULATION_FILL_OPACITY;
+  return ['case', ['has', 'pop_delta_density'], POPULATION_DIFF_FILL_OPACITY, POPULATION_FILL_OPACITY];
+}
+
+export function addDiffPopulationLayers(map: MapLibreMap, classMode: PopulationClassMode = 'change'): void {
   map.addSource('diff-population', { type: 'geojson', data: emptyFC() });
   map.addLayer({
     id: 'diff-population-fill',
     type: 'fill',
     source: 'diff-population',
     paint: {
-      'fill-color': [
-        'case',
-        ['has', 'pop_norm'],
-        [
-          'step', ['get', 'pop_norm'],
-          POPULATION_LOWEST_COLOR,
-          POPULATION_CLASS_BREAKS[0], POPULATION_LOW_COLOR,
-          POPULATION_CLASS_BREAKS[1], POPULATION_MID_COLOR,
-          POPULATION_CLASS_BREAKS[2], POPULATION_HIGH_COLOR,
-          POPULATION_CLASS_BREAKS[3], POPULATION_HIGHEST_COLOR,
-        ],
-        [
-          'step', ['get', 'pop_delta'],
-          POPULATION_BIG_LOSS_COLOR,
-          POPULATION_DIFF_CLASS_BREAKS[0], POPULATION_SMALL_LOSS_COLOR,
-          POPULATION_DIFF_CLASS_BREAKS[1], POPULATION_NEUTRAL_COLOR,
-          POPULATION_DIFF_CLASS_BREAKS[2], POPULATION_SMALL_GAIN_COLOR,
-          POPULATION_DIFF_CLASS_BREAKS[3], POPULATION_BIG_GAIN_COLOR,
-        ],
-      ],
-      'fill-opacity': ['case', ['has', 'pop_norm'], POPULATION_FILL_OPACITY, POPULATION_DIFF_FILL_OPACITY],
+      'fill-color': populationColorExpr(classMode),
+      'fill-opacity': populationOpacityExpr(classMode),
     },
   });
 }
@@ -884,30 +924,60 @@ function fmtPop(n: number): string {
   return Math.round(n).toLocaleString();
 }
 
+function fmtDensity(n: number): string {
+  return n.toLocaleString(undefined, { maximumFractionDigits: 1 });
+}
+
 /** Dwell time before the population tooltip appears — long enough that
  * sweeping the cursor across the choropleth while just looking at the
  * colours doesn't paper the map in popups; only pausing over a cell for a
  * couple seconds surfaces its numbers. */
 const POPULATION_TOOLTIP_DELAY_MS = 2000;
 
+/**
+ * Always prints the same unit the legend classifies by (people/hectare)
+ * alongside the raw people count, so hover text never disagrees with the
+ * fill colour the way the bare people-count tooltip used to — a cell's
+ * colour is always driven by density, so density has to be in the tooltip
+ * too, not just an absolute count that isn't comparable across the
+ * tile-pyramid's varying cell sizes.
+ */
 function populationTooltipHtml(props: Record<string, unknown>): string | null {
-  const { pop_delta: delta, population_a: a, population_b: b, population } = props;
-  if (typeof delta === 'number') {
+  const {
+    pop_delta: delta,
+    population_a: a,
+    population_b: b,
+    pop_density_a: densityA,
+    pop_density_b: densityB,
+    pop_delta_density: deltaDensity,
+    population,
+    pop_density: density,
+  } = props;
+  if (typeof delta === 'number' && typeof deltaDensity === 'number') {
     const sign = delta > 0 ? '+' : '';
-    const changeLine = `Change: ${sign}${fmtPop(delta)}`;
-    const absLine = typeof a === 'number' && typeof b === 'number' ? `${fmtPop(a)} → ${fmtPop(b)} people` : '';
-    return `<div>${absLine}</div><div>${changeLine}</div>`;
+    const lines = [`Change: ${sign}${fmtDensity(deltaDensity)}/ha (${sign}${fmtPop(delta)} people)`];
+    if (typeof a === 'number' && typeof b === 'number') {
+      lines.unshift(`${fmtPop(a)} → ${fmtPop(b)} people`);
+    }
+    if (typeof densityA === 'number' && typeof densityB === 'number') {
+      lines.splice(1, 0, `${fmtDensity(densityA)} → ${fmtDensity(densityB)} people/ha`);
+    }
+    return lines.map((line) => `<div>${line}</div>`).join('');
   }
-  if (typeof population === 'number') return `<div>${fmtPop(population)} people</div>`;
+  if (typeof population === 'number' && typeof density === 'number') {
+    return `<div>${fmtPop(population)} people (${fmtDensity(density)} people/ha)</div>`;
+  }
   return null;
 }
 
 /**
- * Hover tooltip for a population fill layer: shows the cell's absolute
- * population, plus (in network-diff delta mode, where `population_a`/
- * `population_b` are set — see `populationDiffToGeoJSON`) the before/after
- * numbers and the change between them. Shared by the single-feed map's
- * `analysis-population-fill` layer and the diff views' `diff-population-fill`.
+ * Hover tooltip for a population fill layer: shows the cell's population
+ * density (people/hectare — the same unit the fill colour classifies by)
+ * alongside the raw people count for context, plus (in network-diff delta
+ * mode, where `population_a`/`population_b` are set — see
+ * `populationDiffToGeoJSON`) the before/after numbers and the change between
+ * them. Shared by the single-feed map's `analysis-population-fill` layer and
+ * the diff views' `diff-population-fill`.
  *
  * Appears only after the cursor settles on a cell for
  * `POPULATION_TOOLTIP_DELAY_MS` — every `mousemove` restarts the timer, so
@@ -929,6 +999,111 @@ export function attachPopulationTooltip(map: MapLibreMap, layerId: string): void
     const lngLat = evt.lngLat;
     timer = setTimeout(() => {
       const html = populationTooltipHtml(props);
+      if (html) popup.setLngLat(lngLat).setHTML(html).addTo(map);
+    }, POPULATION_TOOLTIP_DELAY_MS);
+  });
+  map.on('mouseleave', layerId, () => {
+    clearTimer();
+    popup.remove();
+  });
+}
+
+/**
+ * ÖV-Güteklassen absolute-class overlay: one fill layer per source id, keyed
+ * on the 0-6 `class` property via a fixed `match` expression (not a
+ * percentile `step` like population's — A-G is an intrinsic category, not a
+ * data-relative bucket). `sourceId`/`layerId` let this be reused for the
+ * single-feed map (`analysis-gueteklassen`) and both split-view panes.
+ * Must be added before `addDiffSegmentLayers`/`addDiffStopLayers`, same
+ * placement rule as `addDiffPopulationLayers`.
+ */
+export function addGueteklassenLayer(map: MapLibreMap, sourceId: string, layerId: string): void {
+  map.addSource(sourceId, { type: 'geojson', data: emptyFC() });
+  map.addLayer({
+    id: layerId,
+    type: 'fill',
+    source: sourceId,
+    paint: {
+      'fill-color': [
+        'match', ['get', 'class'],
+        0, GUTEKLASSE_COLOR[0],
+        1, GUTEKLASSE_COLOR[1],
+        2, GUTEKLASSE_COLOR[2],
+        3, GUTEKLASSE_COLOR[3],
+        4, GUTEKLASSE_COLOR[4],
+        5, GUTEKLASSE_COLOR[5],
+        6, GUTEKLASSE_COLOR[6],
+        '#00000000',
+      ],
+      'fill-opacity': GUTEKLASSEN_FILL_OPACITY,
+    },
+  });
+}
+
+/** Diff-mode absolute Güteklassen source/layer, source id `diff-gueteklassen`. */
+export function addDiffGueteklassenLayers(map: MapLibreMap): void {
+  addGueteklassenLayer(map, 'diff-gueteklassen', 'diff-gueteklassen-fill');
+}
+
+/**
+ * Network-diff overview's categorical change layer: one of 5 fixed colours
+ * per cell (improved/degraded/unchanged/gained/lost), used only when both
+ * feeds' grids can be compared cell-for-cell (see gueteklassenChangeToGeoJSON).
+ */
+export function addDiffGueteklassenChangeLayers(map: MapLibreMap): void {
+  map.addSource('diff-gueteklassen-change', { type: 'geojson', data: emptyFC() });
+  map.addLayer({
+    id: 'diff-gueteklassen-change-fill',
+    type: 'fill',
+    source: 'diff-gueteklassen-change',
+    paint: {
+      'fill-color': [
+        'match', ['get', 'change'],
+        'improved', GUETEKLASSEN_CHANGE_COLOR.improved,
+        'degraded', GUETEKLASSEN_CHANGE_COLOR.degraded,
+        'unchanged', GUETEKLASSEN_CHANGE_COLOR.unchanged,
+        'gained', GUETEKLASSEN_CHANGE_COLOR.gained,
+        'lost', GUETEKLASSEN_CHANGE_COLOR.lost,
+        '#00000000',
+      ],
+      'fill-opacity': GUTEKLASSEN_FILL_OPACITY,
+    },
+  });
+}
+
+function gueteklassenTooltipHtml(props: Record<string, unknown>): string | null {
+  const { class: cls, class_letter: letterProp, haltestellenkategorie: kategorie, distance_m: dist, change } = props;
+  if (typeof change === 'string') {
+    const { class_a: a, class_b: b } = props;
+    const fromLetter = typeof a === 'number' && a >= 0 ? GUTEKLASSE_LETTER[a] : '–';
+    const toLetter = typeof b === 'number' && b >= 0 ? GUTEKLASSE_LETTER[b] : '–';
+    return `<div>${fromLetter} → ${toLetter}</div><div>${String(change)}</div>`;
+  }
+  if (typeof cls !== 'number') return null;
+  const letter = typeof letterProp === 'string' ? letterProp : GUTEKLASSE_LETTER[cls];
+  const kategorieText = kategorie ? `Kategorie ${String(kategorie)}` : '';
+  const distText = typeof dist === 'number' ? `${dist} m to nearest stop` : '';
+  return `<div>Güteklasse ${letter}</div><div>${[kategorieText, distText].filter(Boolean).join(', ')}</div>`;
+}
+
+/** Hover tooltip for a Güteklassen fill layer (absolute or change), same
+ * dwell-timer pattern as `attachPopulationTooltip`. */
+export function attachGueteklassenTooltip(map: MapLibreMap, layerId: string): void {
+  const popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 8 });
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  const clearTimer = () => {
+    if (timer !== null) { clearTimeout(timer); timer = null; }
+  };
+
+  map.on('mousemove', layerId, (evt) => {
+    clearTimer();
+    popup.remove();
+    const props = evt.features?.[0]?.properties;
+    if (!props) return;
+    const lngLat = evt.lngLat;
+    timer = setTimeout(() => {
+      const html = gueteklassenTooltipHtml(props);
       if (html) popup.setLngLat(lngLat).setHTML(html).addTo(map);
     }, POPULATION_TOOLTIP_DELAY_MS);
   });

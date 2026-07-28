@@ -219,7 +219,7 @@ async function tableExists(
   return row.n > 0;
 }
 
-async function columnExists(
+export async function columnExists(
   conn: Awaited<ReturnType<typeof getConnection>>,
   feedId: string,
   stem: string,
@@ -689,6 +689,65 @@ export async function fetchRouteWeeklyTrips(
     const res = await conn.query(sql);
     for (const row of res.toArray()) {
       out.set(String(row.route_id), Number(row.n ?? 0));
+    }
+    return out;
+  } finally {
+    await conn.close();
+  }
+}
+
+/**
+ * Scheduled departures per stop, 6:00-20:00, on a representative weekday
+ * (Wednesday — least likely to fall on a reduced-service/holiday schedule).
+ * Used by the ÖV-Güteklassen analysis layer's stop-interval computation
+ * (see gtfs/gueteklassen.ts). Mirrors `fetchRouteWeeklyTrips`'s
+ * calendar-aware branching: feeds without `calendar.txt` fall back to a
+ * plain per-stop departure count within the time window (no weekday
+ * filtering possible), so the overlay still renders at the cost of not
+ * being a literal "one representative weekday" figure.
+ */
+export async function fetchStopPeakWindowDepartures(feedId: string): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  await ensureFeedTablesLoaded(feedId);
+  const conn = await getConnection();
+  try {
+    const hasStopTimes = await tableExists(conn, feedId, 'stop_times');
+    const hasTrips = await tableExists(conn, feedId, 'trips');
+    if (!hasStopTimes || !hasTrips) return out;
+    // Feeds persisted before departure_time was added to stop_times'
+    // narrow ingest projection (see ingest.ts) won't have this column until
+    // re-uploaded — degrade to "no data" rather than erroring.
+    if (!(await columnExists(conn, feedId, 'stop_times', 'departure_time'))) return out;
+    const st = qualifiedTable(feedId, 'stop_times.txt');
+    const tr = qualifiedTable(feedId, 'trips.txt');
+    const hasCalendar = await tableExists(conn, feedId, 'calendar');
+
+    // GTFS times aren't reliably zero-padded (e.g. "6:00:00" is valid), so a
+    // lexical string BETWEEN would misorder them against '06:00:00' — parse
+    // to minutes-since-midnight instead. SPLIT_PART's 1-indexed parts give
+    // hour/minute; a time past midnight (e.g. "25:00:00") still compares
+    // correctly since minutes just keep counting up past 1440.
+    const minutesExpr = (col: string) =>
+      `TRY_CAST(SPLIT_PART(${col}, ':', 1) AS INTEGER) * 60 + TRY_CAST(SPLIT_PART(${col}, ':', 2) AS INTEGER)`;
+    const windowClause = `${minutesExpr('st.departure_time')} BETWEEN 360 AND 1200`;
+    const sql = hasCalendar
+      ? `
+        SELECT st.stop_id AS stop_id, COUNT(*)::INTEGER AS n
+        FROM ${st} st
+        JOIN ${tr} t ON st.trip_id = t.trip_id
+        JOIN ${qualifiedTable(feedId, 'calendar.txt')} c ON c.service_id = t.service_id
+        WHERE ${windowClause} AND CAST(c.wednesday AS INTEGER) = 1
+        GROUP BY st.stop_id
+      `
+      : `
+        SELECT st.stop_id AS stop_id, COUNT(*)::INTEGER AS n
+        FROM ${st} st
+        WHERE ${windowClause}
+        GROUP BY st.stop_id
+      `;
+    const res = await conn.query(sql);
+    for (const row of res.toArray()) {
+      out.set(String(row.stop_id), Number(row.n ?? 0));
     }
     return out;
   } finally {

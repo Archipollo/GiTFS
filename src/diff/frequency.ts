@@ -169,12 +169,26 @@ export const FREQUENCY_SMALL_GAIN_COLOR = '#6b8ea4';
 /** Large gain (|delta| beyond the outer break) — dark blue. */
 export const FREQUENCY_BIG_GAIN_COLOR = '#366785';
 
+/** Which fixed scale classifies a route's change: relative to its own
+ * baseline (percent), or a flat trips/week amount shared by every route. */
+export type FrequencyClassMode = 'relative' | 'absolute';
+
 /**
- * Break points on `delta_norm` ([-1, 1], delta scaled by `scaleAbsDelta`)
+ * Break points on `percent_delta` (delta as a fraction of `tripsPerWeekA`)
  * separating the 5 classes: < B0 = big loss, [B0,B1) = small loss,
- * [B1,B2] = neutral, (B2,B3] = small gain, > B3 = big gain.
+ * [B1,B2] = neutral, (B2,B3] = small gain, > B3 = big gain. Fixed constants —
+ * unlike the old percentile-scaled breaks, these never move when the entry
+ * set changes (e.g. toggling "include added/removed lines").
  */
-export const FREQUENCY_CLASS_BREAKS: readonly [number, number, number, number] = [-0.5, -0.1, 0.1, 0.5];
+export const FREQUENCY_RELATIVE_CLASS_BREAKS: readonly [number, number, number, number] = [-0.5, -0.15, 0.15, 0.5];
+
+/**
+ * Break points on raw `delta` (trips/week), same 5-class shape as above but
+ * in absolute terms. A trunk line's several-hundred-trip swing and a small
+ * feeder's few-trip swing are judged on the same fixed scale here — use the
+ * relative breaks instead when comparing routes of very different size.
+ */
+export const FREQUENCY_ABSOLUTE_CLASS_BREAKS: readonly [number, number, number, number] = [-50, -10, 10, 50];
 
 /** Line-width range in px, keyed to zoom (not delta magnitude — colour alone
  * encodes the change). Matches the weight of the other diff line layers. */
@@ -188,20 +202,28 @@ export function frequencyDiffToGeoJSON(result: FrequencyDiffResult): GeoJSON.Fea
   // a fixed domain instead of one re-derived from this particular diff's range.
   // Scaled by the robust p95 cap (see `scaleAbsDelta`), clamping outliers.
   const scale = result.scaleAbsDelta > 0 ? result.scaleAbsDelta : 1;
-  const features: GeoJSON.Feature[] = result.entries.map((e) => ({
-    type: 'Feature',
-    geometry: { type: 'MultiLineString', coordinates: e.coords! },
-    properties: {
-      canonicalId: e.canonicalId,
-      shortName: e.shortName,
-      longName: e.longName,
-      mode: e.mode,
-      route_status: e.routeStatus,
-      trips_a: e.tripsPerWeekA,
-      trips_b: e.tripsPerWeekB,
-      delta: e.delta,
-      delta_norm: Math.max(-1, Math.min(1, e.delta / scale)),
-    },
-  }));
+  const features: GeoJSON.Feature[] = result.entries.map((e) => {
+    // Removed routes (tripsPerWeekB === 0) fall out to exactly -1 (past the
+    // bottom break); added routes (tripsPerWeekA === 0) have no baseline to
+    // divide by, so they're pinned past the top break regardless of size.
+    const percentDelta =
+      e.tripsPerWeekA > 0 ? e.delta / e.tripsPerWeekA : e.tripsPerWeekB > 0 ? Number.POSITIVE_INFINITY : 0;
+    return {
+      type: 'Feature',
+      geometry: { type: 'MultiLineString', coordinates: e.coords! },
+      properties: {
+        canonicalId: e.canonicalId,
+        shortName: e.shortName,
+        longName: e.longName,
+        mode: e.mode,
+        route_status: e.routeStatus,
+        trips_a: e.tripsPerWeekA,
+        trips_b: e.tripsPerWeekB,
+        delta: e.delta,
+        delta_norm: Math.max(-1, Math.min(1, e.delta / scale)),
+        percent_delta: Math.max(-1, Math.min(3, percentDelta)),
+      },
+    };
+  });
   return { type: 'FeatureCollection', features };
 }
