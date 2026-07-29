@@ -15,19 +15,30 @@ function yearedOptionLabel(f: FeedMeta): string {
 }
 
 export default function TopBar() {
-  const activeFeedId = useAppStore((s) => s.activeFeedId);
   const compareFeedId = useAppStore((s) => s.compareFeedId);
   const feeds = useAppStore((s) => s.feeds);
   const feedOrder = useAppStore((s) => s.feedOrder);
-  const setActiveFeed = useAppStore((s) => s.setActiveFeed);
   const setCompareFeed = useAppStore((s) => s.setCompareFeed);
   const diffOverviewLayout = useAppStore((s) => s.diffOverviewLayout);
   const setDiffOverviewLayout = useAppStore((s) => s.setDiffOverviewLayout);
+  const feedASelection = useAppStore((s) => s.feedASelection);
+  const setFeedASelection = useAppStore((s) => s.setFeedASelection);
+
+  // Slot A is the persistent Feed A selection, shared by every layout: in
+  // single/split it's the older side of the A/B diff, in timeline it's the
+  // baseline (left edge). Slot B is always the fixed right edge (in timeline,
+  // TimelineStrip bounds its range to A..B and scrubs within it — B doesn't
+  // move just because the slider does).
+  const isTimeline = diffOverviewLayout === 'timeline';
+  const slotAValue = feedASelection;
+  const slotBValue = compareFeedId;
+  const setSlotA = (id: string | null) => setFeedASelection(id);
+  const setSlotB = (id: string | null) => setCompareFeed(id);
 
   const registry = useRegistry();
   const stale = useRegistryStale();
   const { handleBuild, building, registryProgress } = useBuildRegistry();
-  const diff = useDiff(activeFeedId, compareFeedId);
+  const diff = useDiff(slotAValue, slotBValue, isTimeline);
 
   const sortedFeedOrder = [...feedOrder].sort(
     (a, b) => yearOfFeed(feeds[a]).year - yearOfFeed(feeds[b]).year,
@@ -57,13 +68,13 @@ export default function TopBar() {
           <div className="diff-pair-row">
             <span className="diff-pair-badge diff-pair-badge--a">A</span>
             <select
-              value={activeFeedId ?? ''}
-              onChange={(e) => setActiveFeed(e.target.value || null)}
+              value={slotAValue ?? ''}
+              onChange={(e) => setSlotA(e.target.value || null)}
               className="diff-pair-select"
             >
-              <option value="">(pick older feed)</option>
+              <option value="">{isTimeline ? '(pick baseline year)' : '(pick older feed)'}</option>
               {sortedFeedOrder
-                .filter((id) => id !== compareFeedId)
+                .filter((id) => isTimeline || id !== slotBValue || id === slotAValue)
                 .map((id) => {
                   const f = feeds[id];
                   return (
@@ -78,13 +89,13 @@ export default function TopBar() {
           <div className="diff-pair-row">
             <span className="diff-pair-badge diff-pair-badge--b">B</span>
             <select
-              value={compareFeedId ?? ''}
-              onChange={(e) => setCompareFeed(e.target.value || null)}
+              value={slotBValue ?? ''}
+              onChange={(e) => setSlotB(e.target.value || null)}
               className="diff-pair-select"
             >
-              <option value="">(pick newer feed)</option>
+              <option value="">{isTimeline ? '(pick end year)' : '(pick newer feed)'}</option>
               {sortedFeedOrder
-                .filter((id) => id !== activeFeedId)
+                .filter((id) => isTimeline || id !== slotAValue || id === slotBValue)
                 .map((id) => {
                   const f = feeds[id];
                   return (
@@ -98,12 +109,12 @@ export default function TopBar() {
         </div>
 
         <button
-          disabled={building || feedOrder.length < 2 || !activeFeedId || !compareFeedId}
+          disabled={building || feedOrder.length < 2 || !slotAValue || !slotBValue}
           onClick={handleBuild}
           title={
             feedOrder.length < 2
               ? 'Load at least two feeds first'
-              : !activeFeedId || !compareFeedId
+              : !slotAValue || !slotBValue
                 ? 'Select both A and B feeds above'
                 : 'Build entity registry and compute diff'
           }

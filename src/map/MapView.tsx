@@ -29,7 +29,7 @@ import {
   FEED_FREQUENCY_MAX_WIDTH,
   type FeedFrequencyResult,
 } from '../gtfs/frequency';
-import { FrequencyLegend } from '../diff/FrequencyLegend';
+import { FrequencyLegend, FeedStationsSection } from '../diff/FrequencyLegend';
 import { PopulationLegend } from '../diff/PopulationLegend';
 import {
   computeFeedPopulation,
@@ -59,10 +59,14 @@ import { basemapLayers, basemapSources, useBasemap } from './basemap';
 import { useMapBounds } from './useMapBounds';
 import { useRegistry } from '../registry/useRegistry';
 import { lookupStop, lookupRoute } from '../registry/registry';
-import { dropDiffCache, dropShapeIndex } from '../gtfs/segment-graph';
+import { dropDiffCache, dropShapeIndex, SEGMENT_COLOR } from '../gtfs/segment-graph';
 import { dropFeedFrequencyCache } from '../gtfs/frequency';
 import { getRoutesForShape, getRouteDirections } from '../inspector/data';
 import { usePersistedCamera } from './usePersistedCamera';
+import { DIFF_COLOR } from '../diff/geojson';
+import { useBaselineDiff } from '../timeline/useBaselineDiff';
+import { feedYearsOf, feedYearLabels } from '../timeline/math';
+import { exportMapSnapshot } from './exportSnapshot';
 
 const INITIAL_CENTER: [number, number] = [14.55, 47.6];
 const INITIAL_ZOOM = 6.5;
@@ -120,6 +124,16 @@ export default function MapView() {
   const populationSource = useAppStore((s) => s.populationSource);
   const setZaehlsprengelPopulationSummary = useAppStore((s) => s.setZaehlsprengelPopulationSummary);
   const setFeedGueteklassenSummary = useAppStore((s) => s.setFeedGueteklassenSummary);
+  const diffOverviewLayout = useAppStore((s) => s.diffOverviewLayout);
+  const timelineHighlightGrowth = useAppStore((s) => s.timelineHighlightGrowth);
+  const timelineHighlightLoss = useAppStore((s) => s.timelineHighlightLoss);
+  const timelineHighlightReroutes = useAppStore((s) => s.timelineHighlightReroutes);
+  const feedASelection = useAppStore((s) => s.feedASelection);
+  const mapSnapshotRequestId = useAppStore((s) => s.mapSnapshotRequestId);
+  const feeds = useAppStore((s) => s.feeds);
+  const baselineDiff = useBaselineDiff();
+  const baselineAddedStopCount = baselineDiff.kind === 'ready' ? baselineDiff.addedStopCount : undefined;
+  const baselineAddedRouteCount = baselineDiff.kind === 'ready' ? baselineDiff.addedRouteCount : undefined;
 
   // Prebuilt-GeoJSON cache keyed by feedId. Populated lazily on first view of
   // a feed and proactively by the background prefetcher. Once a feed is here,
@@ -171,6 +185,9 @@ export default function MapView() {
       zoom: initialCamera?.zoom ?? INITIAL_ZOOM,
       bearing: initialCamera?.bearing ?? 0,
       pitch: initialCamera?.pitch ?? 0,
+      // Needed so the canvas can be read back via toDataURL/toBlob for the
+      // Timeline view's PNG export.
+      preserveDrawingBuffer: true,
     });
     map.addControl(new maplibregl.NavigationControl(), 'top-right');
     map.on('load', () => {
@@ -183,6 +200,9 @@ export default function MapView() {
       map.addSource('inspector-shape', { type: 'geojson', data: emptyFC() });
       map.addSource('analysis-frequency', { type: 'geojson', data: emptyFC() });
       map.addSource('analysis-population', { type: 'geojson', data: emptyFC() });
+      map.addSource('timeline-baseline-added', { type: 'geojson', data: emptyFC() });
+      map.addSource('timeline-baseline-removed', { type: 'geojson', data: emptyFC() });
+      map.addSource('timeline-baseline-rerouted', { type: 'geojson', data: emptyFC() });
       // Fill layer added before every line/circle layer below so the
       // population choropleth sits under routes and stops, not over them.
       map.addLayer({
@@ -276,6 +296,28 @@ export default function MapView() {
         },
       });
       map.addLayer({
+        id: 'timeline-baseline-rerouted-casing',
+        type: 'line',
+        source: 'timeline-baseline-rerouted',
+        layout: { 'line-cap': 'round', 'line-join': 'round' },
+        paint: {
+          'line-color': '#ffffff',
+          'line-width': ['interpolate', ['linear'], ['zoom'], 8, 3.5, 14, 6.5],
+          'line-opacity': 0.6,
+        },
+      });
+      map.addLayer({
+        id: 'timeline-baseline-rerouted-line',
+        type: 'line',
+        source: 'timeline-baseline-rerouted',
+        layout: { 'line-cap': 'round', 'line-join': 'round' },
+        paint: {
+          'line-color': SEGMENT_COLOR.changed,
+          'line-width': ['interpolate', ['linear'], ['zoom'], 8, 1.6, 14, 3.6],
+          'line-opacity': 0.95,
+        },
+      });
+      map.addLayer({
         id: 'stops-circle',
         type: 'circle',
         source: 'stops',
@@ -285,6 +327,48 @@ export default function MapView() {
           'circle-stroke-color': '#ffffff',
           'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 8, 0.8, 14, 1.8],
           'circle-opacity': 0.9,
+        },
+      });
+      map.addLayer({
+        id: 'timeline-baseline-added-halo',
+        type: 'circle',
+        source: 'timeline-baseline-added',
+        paint: {
+          'circle-radius': ['interpolate', ['linear'], ['zoom'], 8, 4, 14, 10],
+          'circle-color': DIFF_COLOR.added,
+          'circle-opacity': 0.25,
+        },
+      });
+      map.addLayer({
+        id: 'timeline-baseline-added-circle',
+        type: 'circle',
+        source: 'timeline-baseline-added',
+        paint: {
+          'circle-radius': ['interpolate', ['linear'], ['zoom'], 8, 2, 14, 5],
+          'circle-color': DIFF_COLOR.added,
+          'circle-stroke-color': '#ffffff',
+          'circle-stroke-width': 1,
+        },
+      });
+      map.addLayer({
+        id: 'timeline-baseline-removed-halo',
+        type: 'circle',
+        source: 'timeline-baseline-removed',
+        paint: {
+          'circle-radius': ['interpolate', ['linear'], ['zoom'], 8, 4, 14, 10],
+          'circle-color': DIFF_COLOR.removed,
+          'circle-opacity': 0.25,
+        },
+      });
+      map.addLayer({
+        id: 'timeline-baseline-removed-circle',
+        type: 'circle',
+        source: 'timeline-baseline-removed',
+        paint: {
+          'circle-radius': ['interpolate', ['linear'], ['zoom'], 8, 2, 14, 5],
+          'circle-color': DIFF_COLOR.removed,
+          'circle-stroke-color': '#ffffff',
+          'circle-stroke-width': 1,
         },
       });
       map.addLayer({
@@ -735,6 +819,21 @@ export default function MapView() {
     map.flyTo({ center: [lon, lat], zoom: Math.max(map.getZoom(), 13), duration: 700 });
   }, [registryFocus, ready, registrySnapshot]);
 
+  // Drive the timeline's growth/loss/reroute overlay (added/removed stops and
+  // rerouted line geometry, per the shared cumulative-vs-step mode that also
+  // governs the change panel).
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    const isTimeline = diffOverviewLayout === 'timeline' && baselineDiff.kind === 'ready';
+    const showGrowth = isTimeline && timelineHighlightGrowth;
+    const showLoss = isTimeline && timelineHighlightLoss;
+    const showReroutes = isTimeline && timelineHighlightReroutes;
+    setSource(map, 'timeline-baseline-added', showGrowth && baselineDiff.kind === 'ready' ? baselineDiff.addedStops : emptyFC());
+    setSource(map, 'timeline-baseline-removed', showLoss && baselineDiff.kind === 'ready' ? baselineDiff.removedStops : emptyFC());
+    setSource(map, 'timeline-baseline-rerouted', showReroutes && baselineDiff.kind === 'ready' ? baselineDiff.reroutedGeojson : emptyFC());
+  }, [ready, diffOverviewLayout, timelineHighlightGrowth, timelineHighlightLoss, timelineHighlightReroutes, baselineDiff]);
+
   // Drive amber halo rings for all pinned entities.
   useEffect(() => {
     const map = mapRef.current;
@@ -824,6 +923,37 @@ export default function MapView() {
 
   const toggleModeVisibility = useAppStore((s) => s.toggleModeVisibility);
 
+  const handleExportSnapshot = useCallback(() => {
+    const map = mapRef.current;
+    if (!map || !activeFeedId) return;
+    const feedYears = feedYearsOf(feedOrder, feeds);
+    const labels = feedYearLabels(feedYears);
+    const idx = feedYears.findIndex((y) => y.feedId === activeFeedId);
+    const yearLabel = idx >= 0 ? labels[idx] : '';
+    const baselineIdx = feedASelection
+      ? feedYears.findIndex((y) => y.feedId === feedASelection)
+      : -1;
+    exportMapSnapshot(map, {
+      yearLabel,
+      feedLabel: feeds[activeFeedId]?.label ?? activeFeedId,
+      stopCount: feeds[activeFeedId]?.stopCount,
+      routeCount: feeds[activeFeedId]?.routeCount,
+      addedStopCount: baselineAddedStopCount,
+      addedRouteCount: baselineAddedRouteCount,
+      baselineLabel: baselineIdx >= 0 ? labels[baselineIdx] : undefined,
+    });
+  }, [activeFeedId, feedOrder, feeds, feedASelection, baselineAddedStopCount, baselineAddedRouteCount]);
+
+  // The export button lives in the right panel (TimelineChangePanel); this
+  // bumps `mapSnapshotRequestId` there and we react to it here since only
+  // this component holds the live MapLibre instance.
+  const firstSnapshotRequestId = useRef(mapSnapshotRequestId);
+  useEffect(() => {
+    if (mapSnapshotRequestId === firstSnapshotRequestId.current) return;
+    firstSnapshotRequestId.current = mapSnapshotRequestId;
+    handleExportSnapshot();
+  }, [mapSnapshotRequestId, handleExportSnapshot]);
+
   return (
     <>
       <div ref={containerRef} style={{ position: 'absolute', inset: 0 }} />
@@ -835,17 +965,20 @@ export default function MapView() {
         ) : analysisMode === 'gueteklassen' ? (
           <GueteklassenLegend />
         ) : (
-          MODES.map((m) => (
-            <label key={m} className={`diff-count ${modeVisibility[m] ? 'on' : 'off'}`}>
-              <input
-                type="checkbox"
-                checked={modeVisibility[m]}
-                onChange={() => toggleModeVisibility(m)}
-              />
-              <span className="diff-count-swatch" style={{ background: MODE_COLOR[m] }} />
-              <span className="diff-count-label">{MODE_LABEL[m]}</span>
-            </label>
-          ))
+          <>
+            {MODES.map((m) => (
+              <label key={m} className={`diff-count ${modeVisibility[m] ? 'on' : 'off'}`}>
+                <input
+                  type="checkbox"
+                  checked={modeVisibility[m]}
+                  onChange={() => toggleModeVisibility(m)}
+                />
+                <span className="diff-count-swatch" style={{ background: MODE_COLOR[m] }} />
+                <span className="diff-count-label">{MODE_LABEL[m]}</span>
+              </label>
+            ))}
+            {diffOverviewLayout === 'timeline' && <FeedStationsSection />}
+          </>
         )}
       </div>
       <MapOverlay />

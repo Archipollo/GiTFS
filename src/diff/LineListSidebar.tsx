@@ -45,6 +45,7 @@ interface LineRowProps {
   selected: boolean;
   expanded: boolean;
   directionFocus: number | null;
+  showStatus: boolean;
   onSelect: () => void;
   onToggleExpand: () => void;
   onSelectDirection: (dir: number | null) => void;
@@ -53,7 +54,7 @@ interface LineRowProps {
 
 function LineRow({
   row, entry, feedA, feedB, isolableDirections,
-  selected, expanded, directionFocus,
+  selected, expanded, directionFocus, showStatus,
   onSelect, onToggleExpand, onSelectDirection, rowRef,
 }: LineRowProps) {
   const hasDirections = isolableDirections.length > 0;
@@ -72,9 +73,11 @@ function LineRow({
           <ModeSwatch mode={row.mode} />
           <span className="line-list-row-short">{row.shortName || '—'}</span>
           <span className="line-list-row-long">{row.longName}</span>
-          <span className="line-list-row-badge" style={{ background: badge.bg, color: badge.fg }}>
-            {badge.label}
-          </span>
+          {showStatus && (
+            <span className="line-list-row-badge" style={{ background: badge.bg, color: badge.fg }}>
+              {badge.label}
+            </span>
+          )}
         </button>
         {hasDirections && (
           <button
@@ -117,6 +120,8 @@ function LineRow({
 export function LineListSidebar() {
   const activeFeedId = useAppStore((s) => s.activeFeedId);
   const compareFeedId = useAppStore((s) => s.compareFeedId);
+  const diffOverviewLayout = useAppStore((s) => s.diffOverviewLayout);
+  const feedASelection = useAppStore((s) => s.feedASelection);
   const diffRouteFocus = useAppStore((s) => s.diffRouteFocus);
   const diffDirectionFocus = useAppStore((s) => s.diffDirectionFocus);
   const setDiffRouteFocus = useAppStore((s) => s.setDiffRouteFocus);
@@ -124,7 +129,22 @@ export function LineListSidebar() {
   const setDiffViewMode = useAppStore((s) => s.setDiffViewMode);
   const diffRouteDirections = useAppStore((s) => s.diffRouteDirections);
 
-  const diffStatus = useDiff(activeFeedId, compareFeedId);
+  // In Timeline mode the list follows the "since baseline" pairing (matching
+  // the narrative panel), not the free-standing A/B diff slots — those hold
+  // whatever the auto-pair last picked and can coincide with the currently
+  // scrubbed year (e.g. scrubbing to the newest feed), which would otherwise
+  // silently collapse the list to idle.
+  const isTimeline = diffOverviewLayout === 'timeline';
+  const feedA = feedASelection;
+  const feedB = isTimeline ? activeFeedId : compareFeedId;
+
+  // Scrubbed to the baseline year itself: there's nothing to compare against
+  // yet, but the list should still show the baseline's own lines (as the
+  // "status quo") rather than going blank. Self-diffing baseline-vs-baseline
+  // trivially yields "unchanged" for every line, which the UI below hides.
+  const isBaselineView = isTimeline && !!feedA && feedA === feedB;
+
+  const diffStatus = useDiff(feedA, feedB, isBaselineView);
   const diffedShapes = useDiffedShapes(diffStatus);
   const routesWithGeomChange = useAppStore((s) => s.diffRoutesWithGeomChange);
 
@@ -158,8 +178,11 @@ export function LineListSidebar() {
   }, [diffStatus]);
 
   const needle = search.trim().toLowerCase();
+  // Status filters don't apply to the baseline's own line list — every row
+  // trivially self-diffs to "unchanged", so a status chip would just hide
+  // everything except "Unchanged".
   const filteredRows = rows.filter(
-    (r) => (filter === 'all' || r.status === filter) && matchesSearch(r, needle),
+    (r) => (isBaselineView || filter === 'all' || r.status === filter) && matchesSearch(r, needle),
   );
 
   if (diffStatus.kind !== 'ready') return null;
@@ -184,22 +207,24 @@ export function LineListSidebar() {
       <input
         type="text"
         className="line-list-search"
-        placeholder="Search routes..."
+        placeholder="Search lines..."
         value={search}
         onChange={(e) => setSearch(e.target.value)}
       />
-      <div className="line-list-filter-chips">
-        {FILTERS.map(({ id, label }) => (
-          <button
-            key={id}
-            type="button"
-            className={`line-list-chip${filter === id ? ' on' : ' off'}`}
-            onClick={() => setFilter(id)}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
+      {!isBaselineView && (
+        <div className="line-list-filter-chips">
+          {FILTERS.map(({ id, label }) => (
+            <button
+              key={id}
+              type="button"
+              className={`line-list-chip${filter === id ? ' on' : ' off'}`}
+              onClick={() => setFilter(id)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
       <div className="line-list-rows" aria-busy={!diffedShapes}>
         {filteredRows.length === 0 && (
           <p className="muted" style={{ padding: '8px 6px' }}>No lines match.</p>
@@ -209,12 +234,13 @@ export function LineListSidebar() {
             key={row.canonicalId}
             row={row}
             entry={entriesByCid.get(row.canonicalId) ?? null}
-            feedA={activeFeedId}
-            feedB={compareFeedId}
+            feedA={feedA}
+            feedB={feedB}
             isolableDirections={diffRouteDirections?.get(row.canonicalId) ?? []}
             selected={row.canonicalId === diffRouteFocus}
             expanded={expandedId === row.canonicalId}
             directionFocus={diffDirectionFocus}
+            showStatus={!isBaselineView}
             onSelect={() => handleRowClick(row.canonicalId)}
             onToggleExpand={() =>
               setExpandedId((cur) => (cur === row.canonicalId ? null : row.canonicalId))

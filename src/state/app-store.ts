@@ -163,6 +163,60 @@ export interface AppState {
   timelineFeedId: string | null;
   setTimelineFeedId: (feedId: string | null) => void;
 
+  /** Whether the timeline is auto-advancing through feed-years. */
+  timelinePlaying: boolean;
+  setTimelinePlaying: (v: boolean) => void;
+  /** Milliseconds between auto-advance steps while playing. */
+  timelinePlaybackSpeedMs: number;
+  setTimelinePlaybackSpeedMs: (ms: number) => void;
+
+  /**
+   * The persistent "Feed A" selection from the top bar — shared by every
+   * layout (single/split treat it as the older side of the A/B diff;
+   * timeline treats it as the baseline for the added-since-baseline
+   * overlay). Null until a feed set is loaded, at which point it snaps to
+   * the earliest one. Deliberately independent of `activeFeedId`, which in
+   * timeline layout instead mirrors the scrub cursor — keeping this field
+   * separate is what lets Feed A survive switching layouts and scrubbing.
+   */
+  feedASelection: string | null;
+  setFeedASelection: (feedId: string | null) => void;
+  /**
+   * When true, the diff (map overlay, change panel, trend chart) compares
+   * the baseline feed to the current one ("cumulative since baseline").
+   * When false, it compares the previous loaded feed-year to the current
+   * one instead ("this step only"). Shared across every timeline consumer
+   * so they stay in sync.
+   */
+  timelineCumulativeMode: boolean;
+  setTimelineCumulativeMode: (v: boolean) => void;
+  /** Highlight stops/routes added (per `timelineCumulativeMode`) on the map. */
+  timelineHighlightGrowth: boolean;
+  setTimelineHighlightGrowth: (v: boolean) => void;
+  /** Highlight stops/routes removed (per `timelineCumulativeMode`) on the map. */
+  timelineHighlightLoss: boolean;
+  setTimelineHighlightLoss: (v: boolean) => void;
+  /** Highlight lines whose geometry (not identity) differs from baseline. */
+  timelineHighlightReroutes: boolean;
+  setTimelineHighlightReroutes: (v: boolean) => void;
+  /**
+   * When true (default), cumulative-mode growth/loss highlights and counts
+   * reflect *net* change since baseline — a stop added then later removed
+   * nets out and isn't shown. When false, they show every add/remove event
+   * across the chain (gross churn), including reversals. Step mode is
+   * unaffected (net and gross are identical for a single year-over-year diff).
+   */
+  timelineNetChangesMode: boolean;
+  setTimelineNetChangesMode: (v: boolean) => void;
+
+  /**
+   * Bumped to signal "export the current map frame now" — the export button
+   * lives in the right panel (`TimelineChangePanel`) but the live MapLibre
+   * instance is only held by `MapView`, so this bridges the two.
+   */
+  mapSnapshotRequestId: number;
+  requestMapSnapshot: () => void;
+
   /** Pinned canonical entities whose histories are shown in the inspector across years. */
   pinnedEntities: PinnedEntity[];
   addPinnedEntity: (p: PinnedEntity) => void;
@@ -560,6 +614,7 @@ function autoPairDiffFeedsPatch(s: AppState): Partial<AppState> {
   return {
     activeFeedId: oldest,
     compareFeedId: newest,
+    feedASelection: oldest,
     inspectorStop: null,
     inspectorRoute: null,
   };
@@ -604,6 +659,7 @@ export const useAppStore = create<AppState>((set) => ({
         feeds: { ...s.feeds, [meta.id]: meta },
         feedOrder: s.feedOrder.includes(meta.id) ? s.feedOrder : [...s.feedOrder, meta.id],
         activeFeedId: s.activeFeedId ?? meta.id,
+        feedASelection: s.feedASelection ?? meta.id,
       };
       // Re-derive the chronological A/B pair against the enlarged feed set: a
       // newly loaded feed can be the new oldest or newest, and leaving the old
@@ -620,6 +676,7 @@ export const useAppStore = create<AppState>((set) => ({
         feedOrder: s.feedOrder.filter((x) => x !== id),
         activeFeedId: s.activeFeedId === id ? null : s.activeFeedId,
         compareFeedId: s.compareFeedId === id ? null : s.compareFeedId,
+        feedASelection: s.feedASelection === id ? null : s.feedASelection,
       };
     });
   },
@@ -677,6 +734,27 @@ export const useAppStore = create<AppState>((set) => ({
 
   timelineFeedId: null,
   setTimelineFeedId: (timelineFeedId) => set({ timelineFeedId }),
+
+  timelinePlaying: false,
+  setTimelinePlaying: (timelinePlaying) => set({ timelinePlaying }),
+  timelinePlaybackSpeedMs: 1200,
+  setTimelinePlaybackSpeedMs: (timelinePlaybackSpeedMs) => set({ timelinePlaybackSpeedMs }),
+
+  feedASelection: null,
+  setFeedASelection: (feedASelection) => set({ feedASelection }),
+  timelineCumulativeMode: true,
+  setTimelineCumulativeMode: (timelineCumulativeMode) => set({ timelineCumulativeMode }),
+  timelineHighlightGrowth: false,
+  setTimelineHighlightGrowth: (timelineHighlightGrowth) => set({ timelineHighlightGrowth }),
+  timelineHighlightLoss: false,
+  setTimelineHighlightLoss: (timelineHighlightLoss) => set({ timelineHighlightLoss }),
+  timelineHighlightReroutes: false,
+  setTimelineHighlightReroutes: (timelineHighlightReroutes) => set({ timelineHighlightReroutes }),
+  timelineNetChangesMode: true,
+  setTimelineNetChangesMode: (timelineNetChangesMode) => set({ timelineNetChangesMode }),
+
+  mapSnapshotRequestId: 0,
+  requestMapSnapshot: () => set((s) => ({ mapSnapshotRequestId: s.mapSnapshotRequestId + 1 })),
 
   pinnedEntities: [],
   addPinnedEntity: (p) =>

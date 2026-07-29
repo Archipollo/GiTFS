@@ -2,6 +2,7 @@ import type { MouseEvent as ReactMouseEvent } from 'react';
 import { useEffect } from 'react';
 import { useAppStore } from '../state/app-store';
 import PinnedEntityView from '../timeline/PinnedEntityView';
+import { TimelineChangePanel } from '../timeline/TimelineChangePanel';
 import DiffInspector from '../diff/DiffInspector';
 import StopCard from '../inspector/StopCard';
 import RouteCard from '../inspector/RouteCard';
@@ -43,6 +44,7 @@ export default function RightPanel({ visible, onToggle, onResizeStart }: RightPa
             <DiffInspector />
           ) : (
             <>
+              <TimelineChangePanel />
               <h3>Inspector</h3>
               {hasPinned && <PinnedEntityView />}
               {stop && <StopCard />}

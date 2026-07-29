@@ -583,30 +583,63 @@
 
 .timeline-strip {
   position: absolute;
-  left: 50%;
+  left: calc(50% + 70px);
   bottom: 10px;
   transform: translateX(-50%);
   z-index: 9;
-  width: min(380px, calc(100% - 24px));
+  width: min(440px, calc(100% - 24px));
   background: rgba(255, 255, 255, 0.86);
   backdrop-filter: blur(8px) saturate(140%);
   -webkit-backdrop-filter: blur(8px) saturate(140%);
   border: 1px solid var(--border);
   border-radius: 8px;
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
-  padding: 6px 10px 4px;
+  padding: 6px 10px 8px;
   display: flex;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+  gap: 6px;
   pointer-events: all;
   font-size: 11px;
 }
 
-.timeline-strip .muted {
+.timeline-playback-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.timeline-playback-controls button {
+  padding: 2px 8px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.timeline-slider-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.timeline-baseline-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.timeline-slider-row .muted {
   flex: 0 0 auto;
   max-width: 62px;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.timeline-baseline-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--fg-dim);
   white-space: nowrap;
 }
 
@@ -697,6 +730,60 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Timeline change panel (right panel) ------------------------------------ */
+
+.timeline-change-panel {
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.timeline-narrative {
+  list-style: disc;
+  padding-left: 18px;
+  margin: 6px 0 10px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.timeline-change-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  margin: 4px 0 8px;
+}
+.timeline-change-table td {
+  padding: 3px 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.timeline-trend-chart {
+  margin-top: 4px;
+}
+.timeline-trend-chart-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.timeline-trend-chart svg {
+  width: 100%;
+  height: auto;
+}
+
+.timeline-export-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+.timeline-export-actions button {
+  font-size: 11px;
+  padding: 4px 8px;
 }
 
 /* Pinned entity view ---------------------------------------------------- */

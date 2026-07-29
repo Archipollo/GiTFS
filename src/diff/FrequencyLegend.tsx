@@ -81,7 +81,7 @@ function StationsSection() {
   );
 }
 
-function FeedStationsSection() {
+export function FeedStationsSection() {
   const [open, setOpen] = useState(false);
   const showStops = useAppStore((s) => s.showStops);
   const setShowStops = useAppStore((s) => s.setShowStops);

@@ -697,6 +697,42 @@ export async function fetchRouteWeeklyTrips(
 }
 
 /**
+ * Total estimated scheduled trips/week across the whole feed — a single
+ * scalar, not a per-route breakdown. Used by the Timeline view's trend
+ * chart, which needs one number per loaded feed (not a pairwise diff), so
+ * this skips the `GROUP BY route_id` / route-id filter that
+ * `fetchRouteWeeklyTrips` needs for its per-route use case.
+ */
+export async function fetchFeedTotalWeeklyTrips(feedId: string): Promise<number> {
+  await ensureFeedTablesLoaded(feedId);
+  const conn = await getConnection();
+  try {
+    if (!(await tableExists(conn, feedId, 'trips'))) return 0;
+    const trips = qualifiedTable(feedId, 'trips.txt');
+    const hasCalendar = await tableExists(conn, feedId, 'calendar');
+
+    const sql = hasCalendar
+      ? `
+        SELECT SUM(c.wk)::DOUBLE AS n
+        FROM ${trips} t
+        JOIN (
+          SELECT service_id,
+                 (CAST(monday AS INTEGER) + CAST(tuesday AS INTEGER) + CAST(wednesday AS INTEGER)
+                  + CAST(thursday AS INTEGER) + CAST(friday AS INTEGER) + CAST(saturday AS INTEGER)
+                  + CAST(sunday AS INTEGER)) AS wk
+          FROM ${qualifiedTable(feedId, 'calendar.txt')}
+        ) c ON c.service_id = t.service_id
+      `
+      : `SELECT COUNT(*)::DOUBLE AS n FROM ${trips}`;
+    const res = await conn.query(sql);
+    const row = res.toArray()[0];
+    return Number(row?.n ?? 0);
+  } finally {
+    await conn.close();
+  }
+}
+
+/**
  * Scheduled departures per stop, 6:00-20:00, on a representative weekday
  * (Wednesday — least likely to fall on a reduced-service/holiday schedule).
  * Used by the ÖV-Güteklassen analysis layer's stop-interval computation
