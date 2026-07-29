@@ -11,7 +11,7 @@ import type { Mode } from '../gtfs/modes';
 
 // ---- CSV helpers -----------------------------------------------------------
 
-function csvField(v: string | object | null | undefined): string {
+export function csvField(v: string | object | null | undefined): string {
   if (v === null || v === undefined) return '';
   const s = typeof v === 'object' ? JSON.stringify(v) : String(v);
   // Always quote JSON objects; also quote strings containing commas/quotes/newlines/carriage returns.
@@ -21,7 +21,7 @@ function csvField(v: string | object | null | undefined): string {
   return s;
 }
 
-function csvRow(fields: (string | object | null | undefined)[]): string {
+export function csvRow(fields: (string | object | null | undefined)[]): string {
   return fields.map(csvField).join(',');
 }
 

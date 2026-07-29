@@ -14,6 +14,7 @@ import { useEffect, useState } from 'react';
 import { useAppStore } from '../state/app-store';
 import { useRegistry } from '../registry/useRegistry';
 import type { LineForStop } from '../gtfs/queries';
+import { fetchRouteWeeklyTrips } from '../gtfs/queries';
 import { getLinesForStop, getRouteDirections, useRouteDirections } from './data';
 import { InspectorSection, ModeSwatch, StopPill } from './components';
 import { MODE_LABEL } from '../gtfs/modes';
@@ -35,6 +36,11 @@ export default function RouteCard() {
   }, [route?.feedId, route?.rawId]);
 
   const metaLine = useLineMeta(route?.feedId ?? null, route?.rawId ?? null, stop?.rawId ?? null);
+  const analysisMode = useAppStore((s) => s.analysisMode);
+  const weeklyTrips = useRouteWeeklyTrips(
+    analysisMode === 'frequency' ? route?.feedId ?? null : null,
+    route?.rawId ?? null,
+  );
 
   if (!route) return null;
 
@@ -86,6 +92,19 @@ export default function RouteCard() {
           <div className="muted inspector-canonical-label">Canonical</div>
           <div className="inspector-canonical-id">{route.canonicalId}</div>
         </div>
+      )}
+
+      {weeklyTrips != null && (
+        <InspectorSection title="Analysis">
+          <table className="diff-ab-table">
+            <tbody>
+              <tr>
+                <td className="muted">Trips/week</td>
+                <td>{weeklyTrips}</td>
+              </tr>
+            </tbody>
+          </table>
+        </InspectorSection>
       )}
 
       <InspectorSection
@@ -180,7 +199,7 @@ function DirectionHeader({
             → {course.headsign || '(no headsign)'}
           </div>
           <div className="muted route-course-trips">
-            ~{course.trip_count.toLocaleString()} trips in this pattern
+            ~{course.trip_count} trips in this pattern
           </div>
         </div>
         {totalCourses > 1 && (
@@ -196,6 +215,23 @@ function DirectionHeader({
       </div>
     </div>
   );
+}
+
+/**
+ * This route's trips/week, only queried while the Analysis toolbox's
+ * Frequency mode is active (`feedId` is passed as `null` otherwise).
+ */
+function useRouteWeeklyTrips(feedId: string | null, routeId: string | null): number | null {
+  const [trips, setTrips] = useState<number | null>(null);
+  useEffect(() => {
+    if (!feedId || !routeId) { setTrips(null); return; }
+    let cancelled = false;
+    fetchRouteWeeklyTrips(feedId, [routeId])
+      .then((m) => { if (!cancelled) setTrips(m.get(routeId) ?? 0); })
+      .catch((err) => console.warn('route weekly-trips lookup failed', err));
+    return () => { cancelled = true; };
+  }, [feedId, routeId]);
+  return trips;
 }
 
 /**

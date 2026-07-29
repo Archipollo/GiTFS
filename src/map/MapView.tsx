@@ -16,14 +16,57 @@ import {
   type ShapePolyline,
 } from '../gtfs/queries';
 import { MODES, MODE_COLOR, MODE_LABEL, type Mode } from '../gtfs/modes';
+import {
+  getOrComputeFeedFrequency,
+  feedFrequencyToGeoJSON,
+  FEED_FREQUENCY_LOWEST_COLOR,
+  FEED_FREQUENCY_LOW_COLOR,
+  FEED_FREQUENCY_MID_COLOR,
+  FEED_FREQUENCY_HIGH_COLOR,
+  FEED_FREQUENCY_HIGHEST_COLOR,
+  FEED_FREQUENCY_CLASS_BREAKS,
+  FEED_FREQUENCY_MIN_WIDTH,
+  FEED_FREQUENCY_MAX_WIDTH,
+  type FeedFrequencyResult,
+} from '../gtfs/frequency';
+import { FrequencyLegend, FeedStationsSection } from '../diff/FrequencyLegend';
+import { PopulationLegend } from '../diff/PopulationLegend';
+import {
+  computeFeedPopulation,
+  feedPopulationToGeoJSON,
+  POPULATION_LOWEST_COLOR,
+  POPULATION_LOW_COLOR,
+  POPULATION_MID_COLOR,
+  POPULATION_HIGH_COLOR,
+  POPULATION_HIGHEST_COLOR,
+  POPULATION_CLASS_BREAKS,
+  POPULATION_FILL_OPACITY,
+  type FeedPopulationResult,
+  type Bbox,
+} from '../gtfs/population';
+import { getOrComputeZaehlsprengelPopulation, type ZaehlsprengelResult } from '../gtfs/zaehlsprengel';
+import { attachPopulationTooltip, addGueteklassenLayer, attachGueteklassenTooltip } from '../diff/diffMapLayers';
+import {
+  computeFeedGueteklassen,
+  feedGueteklassenToGeoJSON,
+  dropFeedGueteklassenCache,
+  type FeedGueteklassenResult,
+} from '../gtfs/gueteklassen';
+import { GueteklassenLegend } from '../diff/GueteklassenLegend';
 import MapOverlay from './MapOverlay';
 import { BasemapControls } from './BasemapControls';
 import { basemapLayers, basemapSources, useBasemap } from './basemap';
+import { useMapBounds } from './useMapBounds';
 import { useRegistry } from '../registry/useRegistry';
 import { lookupStop, lookupRoute } from '../registry/registry';
-import { dropDiffCache, dropShapeIndex } from '../gtfs/segment-graph';
+import { dropDiffCache, dropShapeIndex, SEGMENT_COLOR } from '../gtfs/segment-graph';
+import { dropFeedFrequencyCache } from '../gtfs/frequency';
 import { getRoutesForShape, getRouteDirections } from '../inspector/data';
 import { usePersistedCamera } from './usePersistedCamera';
+import { DIFF_COLOR } from '../diff/geojson';
+import { useBaselineDiff } from '../timeline/useBaselineDiff';
+import { feedYearsOf, feedYearLabels } from '../timeline/math';
+import { exportMapSnapshot } from './exportSnapshot';
 
 const INITIAL_CENTER: [number, number] = [14.55, 47.6];
 const INITIAL_ZOOM = 6.5;
@@ -75,6 +118,22 @@ export default function MapView() {
   const registrySnapshot = useRegistry();
   const registryFocus = useAppStore((s) => s.registryFocus);
   const pinnedEntities = useAppStore((s) => s.pinnedEntities);
+  const analysisMode = useAppStore((s) => s.analysisMode);
+  const setFeedFrequencySummary = useAppStore((s) => s.setFeedFrequencySummary);
+  const setFeedPopulationSummary = useAppStore((s) => s.setFeedPopulationSummary);
+  const populationSource = useAppStore((s) => s.populationSource);
+  const setZaehlsprengelPopulationSummary = useAppStore((s) => s.setZaehlsprengelPopulationSummary);
+  const setFeedGueteklassenSummary = useAppStore((s) => s.setFeedGueteklassenSummary);
+  const diffOverviewLayout = useAppStore((s) => s.diffOverviewLayout);
+  const timelineHighlightGrowth = useAppStore((s) => s.timelineHighlightGrowth);
+  const timelineHighlightLoss = useAppStore((s) => s.timelineHighlightLoss);
+  const timelineHighlightReroutes = useAppStore((s) => s.timelineHighlightReroutes);
+  const feedASelection = useAppStore((s) => s.feedASelection);
+  const mapSnapshotRequestId = useAppStore((s) => s.mapSnapshotRequestId);
+  const feeds = useAppStore((s) => s.feeds);
+  const baselineDiff = useBaselineDiff();
+  const baselineAddedStopCount = baselineDiff.kind === 'ready' ? baselineDiff.addedStopCount : undefined;
+  const baselineAddedRouteCount = baselineDiff.kind === 'ready' ? baselineDiff.addedRouteCount : undefined;
 
   // Prebuilt-GeoJSON cache keyed by feedId. Populated lazily on first view of
   // a feed and proactively by the background prefetcher. Once a feed is here,
@@ -126,6 +185,9 @@ export default function MapView() {
       zoom: initialCamera?.zoom ?? INITIAL_ZOOM,
       bearing: initialCamera?.bearing ?? 0,
       pitch: initialCamera?.pitch ?? 0,
+      // Needed so the canvas can be read back via toDataURL/toBlob for the
+      // Timeline view's PNG export.
+      preserveDrawingBuffer: true,
     });
     map.addControl(new maplibregl.NavigationControl(), 'top-right');
     map.on('load', () => {
@@ -136,6 +198,82 @@ export default function MapView() {
       map.addSource('inspector-route-stops', { type: 'geojson', data: emptyFC() });
       map.addSource('inspector-stop', { type: 'geojson', data: emptyFC() });
       map.addSource('inspector-shape', { type: 'geojson', data: emptyFC() });
+      map.addSource('analysis-frequency', { type: 'geojson', data: emptyFC() });
+      map.addSource('analysis-population', { type: 'geojson', data: emptyFC() });
+      map.addSource('timeline-baseline-added', { type: 'geojson', data: emptyFC() });
+      map.addSource('timeline-baseline-removed', { type: 'geojson', data: emptyFC() });
+      map.addSource('timeline-baseline-rerouted', { type: 'geojson', data: emptyFC() });
+      // Fill layer added before every line/circle layer below so the
+      // population choropleth sits under routes and stops, not over them.
+      map.addLayer({
+        id: 'analysis-population-fill',
+        type: 'fill',
+        source: 'analysis-population',
+        paint: {
+          'fill-color': [
+            'step',
+            ['get', 'pop_norm'],
+            POPULATION_LOWEST_COLOR,
+            POPULATION_CLASS_BREAKS[0], POPULATION_LOW_COLOR,
+            POPULATION_CLASS_BREAKS[1], POPULATION_MID_COLOR,
+            POPULATION_CLASS_BREAKS[2], POPULATION_HIGH_COLOR,
+            POPULATION_CLASS_BREAKS[3], POPULATION_HIGHEST_COLOR,
+          ],
+          'fill-opacity': POPULATION_FILL_OPACITY,
+        },
+      });
+      attachPopulationTooltip(map, 'analysis-population-fill');
+      // Same "under everything" placement as the population fill above.
+      addGueteklassenLayer(map, 'analysis-gueteklassen', 'analysis-gueteklassen-fill');
+      attachGueteklassenTooltip(map, 'analysis-gueteklassen-fill');
+      // Width encodes trips/week (not just zoom): a low-frequency route stays
+      // near the thin end at any zoom, a high-frequency one renders near the
+      // thick end — same "magnitude in the line itself" treatment as the
+      // diff-mode frequency overlay.
+      // MapLibre allows only one zoom-based interpolate per expression, so
+      // zoom must be the outer interpolate and magnitude the inner one.
+      const feedMagnitudeWidthExpr: maplibregl.ExpressionSpecification = [
+        'interpolate', ['linear'], ['zoom'],
+        8, ['interpolate', ['linear'], ['get', 'trips_norm'], 0, FEED_FREQUENCY_MIN_WIDTH, 1, FEED_FREQUENCY_MIN_WIDTH + 0.8],
+        14, ['interpolate', ['linear'], ['get', 'trips_norm'], 0, FEED_FREQUENCY_MIN_WIDTH + 0.6, 1, FEED_FREQUENCY_MAX_WIDTH],
+      ];
+      // MapLibre requires the zoom-based interpolate to be the property's
+      // top-level expression, so the casing's "+2px" offset is baked into its
+      // own copy's stops rather than wrapped around the line's expression.
+      const feedMagnitudeCasingWidthExpr: maplibregl.ExpressionSpecification = [
+        'interpolate', ['linear'], ['zoom'],
+        8, ['interpolate', ['linear'], ['get', 'trips_norm'], 0, FEED_FREQUENCY_MIN_WIDTH + 2, 1, FEED_FREQUENCY_MIN_WIDTH + 2.8],
+        14, ['interpolate', ['linear'], ['get', 'trips_norm'], 0, FEED_FREQUENCY_MIN_WIDTH + 2.6, 1, FEED_FREQUENCY_MAX_WIDTH + 2],
+      ];
+      map.addLayer({
+        id: 'analysis-frequency-casing',
+        type: 'line',
+        source: 'analysis-frequency',
+        layout: { 'line-cap': 'round', 'line-join': 'round' },
+        paint: {
+          'line-color': '#ffffff',
+          'line-width': feedMagnitudeCasingWidthExpr,
+          'line-opacity': 0.55,
+        },
+      });
+      map.addLayer({
+        id: 'analysis-frequency-line',
+        type: 'line',
+        source: 'analysis-frequency',
+        paint: {
+          'line-color': [
+            'step',
+            ['get', 'trips_per_week'],
+            FEED_FREQUENCY_LOWEST_COLOR,
+            FEED_FREQUENCY_CLASS_BREAKS[0], FEED_FREQUENCY_LOW_COLOR,
+            FEED_FREQUENCY_CLASS_BREAKS[1], FEED_FREQUENCY_MID_COLOR,
+            FEED_FREQUENCY_CLASS_BREAKS[2], FEED_FREQUENCY_HIGH_COLOR,
+            FEED_FREQUENCY_CLASS_BREAKS[3], FEED_FREQUENCY_HIGHEST_COLOR,
+          ],
+          'line-width': feedMagnitudeWidthExpr,
+          'line-opacity': 0.95,
+        },
+      });
       map.addLayer({
         id: 'shapes-line-casing',
         type: 'line',
@@ -158,6 +296,28 @@ export default function MapView() {
         },
       });
       map.addLayer({
+        id: 'timeline-baseline-rerouted-casing',
+        type: 'line',
+        source: 'timeline-baseline-rerouted',
+        layout: { 'line-cap': 'round', 'line-join': 'round' },
+        paint: {
+          'line-color': '#ffffff',
+          'line-width': ['interpolate', ['linear'], ['zoom'], 8, 3.5, 14, 6.5],
+          'line-opacity': 0.6,
+        },
+      });
+      map.addLayer({
+        id: 'timeline-baseline-rerouted-line',
+        type: 'line',
+        source: 'timeline-baseline-rerouted',
+        layout: { 'line-cap': 'round', 'line-join': 'round' },
+        paint: {
+          'line-color': SEGMENT_COLOR.changed,
+          'line-width': ['interpolate', ['linear'], ['zoom'], 8, 1.6, 14, 3.6],
+          'line-opacity': 0.95,
+        },
+      });
+      map.addLayer({
         id: 'stops-circle',
         type: 'circle',
         source: 'stops',
@@ -167,6 +327,48 @@ export default function MapView() {
           'circle-stroke-color': '#ffffff',
           'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 8, 0.8, 14, 1.8],
           'circle-opacity': 0.9,
+        },
+      });
+      map.addLayer({
+        id: 'timeline-baseline-added-halo',
+        type: 'circle',
+        source: 'timeline-baseline-added',
+        paint: {
+          'circle-radius': ['interpolate', ['linear'], ['zoom'], 8, 4, 14, 10],
+          'circle-color': DIFF_COLOR.added,
+          'circle-opacity': 0.25,
+        },
+      });
+      map.addLayer({
+        id: 'timeline-baseline-added-circle',
+        type: 'circle',
+        source: 'timeline-baseline-added',
+        paint: {
+          'circle-radius': ['interpolate', ['linear'], ['zoom'], 8, 2, 14, 5],
+          'circle-color': DIFF_COLOR.added,
+          'circle-stroke-color': '#ffffff',
+          'circle-stroke-width': 1,
+        },
+      });
+      map.addLayer({
+        id: 'timeline-baseline-removed-halo',
+        type: 'circle',
+        source: 'timeline-baseline-removed',
+        paint: {
+          'circle-radius': ['interpolate', ['linear'], ['zoom'], 8, 4, 14, 10],
+          'circle-color': DIFF_COLOR.removed,
+          'circle-opacity': 0.25,
+        },
+      });
+      map.addLayer({
+        id: 'timeline-baseline-removed-circle',
+        type: 'circle',
+        source: 'timeline-baseline-removed',
+        paint: {
+          'circle-radius': ['interpolate', ['linear'], ['zoom'], 8, 2, 14, 5],
+          'circle-color': DIFF_COLOR.removed,
+          'circle-stroke-color': '#ffffff',
+          'circle-stroke-width': 1,
         },
       });
       map.addLayer({
@@ -304,9 +506,26 @@ export default function MapView() {
           .catch((err) => console.warn('shape→route resolve failed', err));
       });
 
+      map.on('mouseenter', 'analysis-frequency-line', () => {
+        map.getCanvas().style.cursor = 'pointer';
+      });
+      map.on('mouseleave', 'analysis-frequency-line', () => {
+        map.getCanvas().style.cursor = '';
+      });
+      map.on('click', 'analysis-frequency-line', (evt) => {
+        const feature = evt.features?.[0];
+        if (!feature) return;
+        const activeId = useAppStore.getState().activeFeedId;
+        if (!activeId) return;
+        const routeId = String(feature.properties?.route_id ?? '');
+        if (!routeId) return;
+        const canonical = lookupRoute(activeId, routeId)?.canonicalId ?? null;
+        useAppStore.getState().setInspectorRoute({ feedId: activeId, rawId: routeId, shapeId: '', canonicalId: canonical });
+      });
+
       map.on('click', (evt) => {
         const hit = map.queryRenderedFeatures(evt.point, {
-          layers: ['stops-circle', 'shapes-line'],
+          layers: ['stops-circle', 'shapes-line', 'analysis-frequency-line'],
         });
         if (hit.length === 0) {
           clearInspector();
@@ -397,6 +616,8 @@ export default function MapView() {
         cacheRef.current.delete(key);
         dropShapeIndex(key);
         dropDiffCache(key);
+        dropFeedFrequencyCache(key);
+        dropFeedGueteklassenCache(key);
       }
     }
     for (const key of [...pendingRef.current.keys()]) {
@@ -417,6 +638,151 @@ export default function MapView() {
     map.setFilter('shapes-line-casing', modeFilter);
     map.setFilter('shapes-line', modeFilter);
   }, [showStops, modeVisibility, ready]);
+
+  // Frequency analysis (no diff pair, so this is absolute trips/week rather
+  // than a delta) — computed for whichever feed is active, so it also tracks
+  // the timeline slider. Cached per feedId in `getOrComputeFeedFrequency`.
+  const [feedFrequency, setFeedFrequency] = useState<FeedFrequencyResult | null>(null);
+  useEffect(() => {
+    if (analysisMode !== 'frequency' || !activeFeedId) {
+      setFeedFrequency(null);
+      return;
+    }
+    let cancelled = false;
+    ensureFeedRender(activeFeedId)
+      .then((entry) => {
+        const routeIds = [...new Set([...entry.shapeToRoute.values()].flat())];
+        return getOrComputeFeedFrequency(activeFeedId, routeIds);
+      })
+      .then((r) => { if (!cancelled) setFeedFrequency(r); })
+      .catch((err) => console.warn('feed frequency compute failed', err));
+    return () => { cancelled = true; };
+  }, [analysisMode, activeFeedId, ensureFeedRender]);
+
+  // Geometry (mode-colored) and frequency are mutually exclusive overlays,
+  // same rule as the diff-mode map views — both trace the same shapes.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    const showingFrequency = analysisMode === 'frequency';
+    map.setLayoutProperty('shapes-line', 'visibility', showingFrequency ? 'none' : 'visible');
+    map.setLayoutProperty('shapes-line-casing', 'visibility', showingFrequency ? 'none' : 'visible');
+
+    if (!showingFrequency || !activeFeedId || !feedFrequency || feedFrequency.feedId !== activeFeedId) {
+      setSource(map, 'analysis-frequency', emptyFC());
+      return;
+    }
+    setSource(map, 'analysis-frequency', feedFrequencyToGeoJSON(feedFrequency));
+    setFeedFrequencySummary({
+      feedId: feedFrequency.feedId,
+      maxWeeklyTrips: feedFrequency.maxWeeklyTrips,
+      scaleWeeklyTrips: feedFrequency.scaleWeeklyTrips,
+      routeCount: feedFrequency.entries.length,
+    });
+  }, [analysisMode, activeFeedId, feedFrequency, ready, setFeedFrequencySummary]);
+
+  // Population analysis — a fill layer under the routes/stops, so unlike
+  // frequency it coexists with the normal geometry (no visibility toggling
+  // needed here). Scoped to whatever bbox the map currently shows.
+  const populationBounds = useMapBounds(mapRef, ready);
+  const [feedPopulation, setFeedPopulation] = useState<FeedPopulationResult | null>(null);
+  useEffect(() => {
+    if (analysisMode !== 'population' || populationSource !== 'ghs' || !activeFeedId || !populationBounds) {
+      setFeedPopulation(null);
+      return;
+    }
+    const feed = useAppStore.getState().feeds[activeFeedId];
+    if (!feed) { setFeedPopulation(null); return; }
+    let cancelled = false;
+    ensureFeedRender(activeFeedId).then((entry) => {
+      if (cancelled) return;
+      // The feed's full stops extent, not the current viewport — see the
+      // `scaleBbox` comment in gtfs/population.ts. Falls back to the
+      // viewport itself for a (stopless) feed with no computable bounds.
+      const scaleBbox: Bbox = entry.bounds ? bboxFromBounds(entry.bounds) : populationBounds;
+      return computeFeedPopulation(yearOfFeed(feed).year, populationBounds, scaleBbox);
+    })
+      .then((r) => { if (!cancelled && r) setFeedPopulation(r); })
+      .catch((err) => console.warn('feed population compute failed', err));
+    return () => { cancelled = true; };
+  }, [analysisMode, populationSource, activeFeedId, populationBounds, ensureFeedRender]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    if (analysisMode !== 'population' || populationSource !== 'ghs' || !feedPopulation) {
+      setFeedPopulationSummary(null);
+      setSource(map, 'analysis-population', emptyFC());
+      return;
+    }
+    setSource(map, 'analysis-population', feedPopulationToGeoJSON(feedPopulation));
+    setFeedPopulationSummary({
+      year: feedPopulation.summary.year,
+      maxPopulation: feedPopulation.summary.maxPopulation,
+      scalePopulation: feedPopulation.summary.scalePopulation,
+      cellCount: feedPopulation.summary.cellCount,
+      cellSizeMeters: feedPopulation.summary.cellSizeMeters,
+    });
+  }, [analysisMode, populationSource, feedPopulation, ready, setFeedPopulationSummary]);
+
+  // Zählsprengel source: same fill layer/source as GHS-POP (both key off
+  // `pop_norm`), just a different data provider and no feed-year dependency
+  // — see gtfs/zaehlsprengel.ts.
+  const [zaehlsprengelPopulation, setZaehlsprengelPopulation] = useState<ZaehlsprengelResult | null>(null);
+  useEffect(() => {
+    if (analysisMode !== 'population' || populationSource !== 'zsp' || !activeFeedId || !populationBounds) {
+      setZaehlsprengelPopulation(null);
+      return;
+    }
+    let cancelled = false;
+    ensureFeedRender(activeFeedId).then((entry) => {
+      if (cancelled) return;
+      const scaleBbox: Bbox = entry.bounds ? bboxFromBounds(entry.bounds) : populationBounds;
+      return getOrComputeZaehlsprengelPopulation(populationBounds, scaleBbox);
+    })
+      .then((r) => { if (!cancelled && r) setZaehlsprengelPopulation(r); })
+      .catch((err) => console.warn('zählsprengel population fetch failed', err));
+    return () => { cancelled = true; };
+  }, [analysisMode, populationSource, activeFeedId, populationBounds, ensureFeedRender]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    if (analysisMode !== 'population' || populationSource !== 'zsp' || !zaehlsprengelPopulation) {
+      setZaehlsprengelPopulationSummary(null);
+      setSource(map, 'analysis-population', emptyFC());
+      return;
+    }
+    setSource(map, 'analysis-population', zaehlsprengelPopulation.geojson);
+    setZaehlsprengelPopulationSummary(zaehlsprengelPopulation.summary);
+  }, [analysisMode, populationSource, zaehlsprengelPopulation, ready, setZaehlsprengelPopulationSummary]);
+
+  // ÖV-Güteklassen analysis — a fill layer under routes/stops like population,
+  // scoped to the current viewport (see gtfs/gueteklassen.ts).
+  const [feedGueteklassen, setFeedGueteklassen] = useState<FeedGueteklassenResult | null>(null);
+  useEffect(() => {
+    if (analysisMode !== 'gueteklassen' || !activeFeedId || !populationBounds) {
+      setFeedGueteklassen(null);
+      return;
+    }
+    let cancelled = false;
+    computeFeedGueteklassen(activeFeedId, populationBounds)
+      .then((r) => { if (!cancelled) setFeedGueteklassen(r); })
+      .catch((err) => console.warn('feed gueteklassen compute failed', err));
+    return () => { cancelled = true; };
+  }, [analysisMode, activeFeedId, populationBounds]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    if (analysisMode !== 'gueteklassen' || !feedGueteklassen) {
+      setFeedGueteklassenSummary(null);
+      setSource(map, 'analysis-gueteklassen', emptyFC());
+      return;
+    }
+    setSource(map, 'analysis-gueteklassen', feedGueteklassenToGeoJSON(feedGueteklassen));
+    setFeedGueteklassenSummary(feedGueteklassen.summary);
+  }, [analysisMode, feedGueteklassen, ready, setFeedGueteklassenSummary]);
 
   // Basemap style + era-matched Wayback satellite, shared with the diff views.
   const basemapYear = useAppStore((s) =>
@@ -452,6 +818,21 @@ export default function MapView() {
     });
     map.flyTo({ center: [lon, lat], zoom: Math.max(map.getZoom(), 13), duration: 700 });
   }, [registryFocus, ready, registrySnapshot]);
+
+  // Drive the timeline's growth/loss/reroute overlay (added/removed stops and
+  // rerouted line geometry, per the shared cumulative-vs-step mode that also
+  // governs the change panel).
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    const isTimeline = diffOverviewLayout === 'timeline' && baselineDiff.kind === 'ready';
+    const showGrowth = isTimeline && timelineHighlightGrowth;
+    const showLoss = isTimeline && timelineHighlightLoss;
+    const showReroutes = isTimeline && timelineHighlightReroutes;
+    setSource(map, 'timeline-baseline-added', showGrowth && baselineDiff.kind === 'ready' ? baselineDiff.addedStops : emptyFC());
+    setSource(map, 'timeline-baseline-removed', showLoss && baselineDiff.kind === 'ready' ? baselineDiff.removedStops : emptyFC());
+    setSource(map, 'timeline-baseline-rerouted', showReroutes && baselineDiff.kind === 'ready' ? baselineDiff.reroutedGeojson : emptyFC());
+  }, [ready, diffOverviewLayout, timelineHighlightGrowth, timelineHighlightLoss, timelineHighlightReroutes, baselineDiff]);
 
   // Drive amber halo rings for all pinned entities.
   useEffect(() => {
@@ -542,21 +923,63 @@ export default function MapView() {
 
   const toggleModeVisibility = useAppStore((s) => s.toggleModeVisibility);
 
+  const handleExportSnapshot = useCallback(() => {
+    const map = mapRef.current;
+    if (!map || !activeFeedId) return;
+    const feedYears = feedYearsOf(feedOrder, feeds);
+    const labels = feedYearLabels(feedYears);
+    const idx = feedYears.findIndex((y) => y.feedId === activeFeedId);
+    const yearLabel = idx >= 0 ? labels[idx] : '';
+    const baselineIdx = feedASelection
+      ? feedYears.findIndex((y) => y.feedId === feedASelection)
+      : -1;
+    exportMapSnapshot(map, {
+      yearLabel,
+      feedLabel: feeds[activeFeedId]?.label ?? activeFeedId,
+      stopCount: feeds[activeFeedId]?.stopCount,
+      routeCount: feeds[activeFeedId]?.routeCount,
+      addedStopCount: baselineAddedStopCount,
+      addedRouteCount: baselineAddedRouteCount,
+      baselineLabel: baselineIdx >= 0 ? labels[baselineIdx] : undefined,
+    });
+  }, [activeFeedId, feedOrder, feeds, feedASelection, baselineAddedStopCount, baselineAddedRouteCount]);
+
+  // The export button lives in the right panel (TimelineChangePanel); this
+  // bumps `mapSnapshotRequestId` there and we react to it here since only
+  // this component holds the live MapLibre instance.
+  const firstSnapshotRequestId = useRef(mapSnapshotRequestId);
+  useEffect(() => {
+    if (mapSnapshotRequestId === firstSnapshotRequestId.current) return;
+    firstSnapshotRequestId.current = mapSnapshotRequestId;
+    handleExportSnapshot();
+  }, [mapSnapshotRequestId, handleExportSnapshot]);
+
   return (
     <>
       <div ref={containerRef} style={{ position: 'absolute', inset: 0 }} />
       <div className="map-mode-legend">
-        {MODES.map((m) => (
-          <label key={m} className={`diff-count ${modeVisibility[m] ? 'on' : 'off'}`}>
-            <input
-              type="checkbox"
-              checked={modeVisibility[m]}
-              onChange={() => toggleModeVisibility(m)}
-            />
-            <span className="diff-count-swatch" style={{ background: MODE_COLOR[m] }} />
-            <span className="diff-count-label">{MODE_LABEL[m]}</span>
-          </label>
-        ))}
+        {analysisMode === 'frequency' ? (
+          <FrequencyLegend />
+        ) : analysisMode === 'population' ? (
+          <PopulationLegend />
+        ) : analysisMode === 'gueteklassen' ? (
+          <GueteklassenLegend />
+        ) : (
+          <>
+            {MODES.map((m) => (
+              <label key={m} className={`diff-count ${modeVisibility[m] ? 'on' : 'off'}`}>
+                <input
+                  type="checkbox"
+                  checked={modeVisibility[m]}
+                  onChange={() => toggleModeVisibility(m)}
+                />
+                <span className="diff-count-swatch" style={{ background: MODE_COLOR[m] }} />
+                <span className="diff-count-label">{MODE_LABEL[m]}</span>
+              </label>
+            ))}
+            {diffOverviewLayout === 'timeline' && <FeedStationsSection />}
+          </>
+        )}
       </div>
       <MapOverlay />
       <BasemapControls />
@@ -633,6 +1056,14 @@ function shapesToGeoJSON(shapes: ShapePolyline[]): GeoJSON.FeatureCollection {
       },
     })),
   };
+}
+
+/** `boundsOfStops`/`ensureFeedRender`'s `entry.bounds` is always this concrete
+ * SW/NE-corner shape (never another `LngLatBoundsLike` variant), so this
+ * narrows it back to a flat `Bbox` for the population-scale callers. */
+function bboxFromBounds(bounds: maplibregl.LngLatBoundsLike): Bbox {
+  const b = bounds as [[number, number], [number, number]];
+  return [b[0][0], b[0][1], b[1][0], b[1][1]];
 }
 
 function boundsOfStops(stops: { lat: number; lon: number }[]): maplibregl.LngLatBoundsLike {

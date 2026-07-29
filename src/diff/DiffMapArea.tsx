@@ -63,7 +63,13 @@ export function DiffMapArea() {
     );
   }
 
-  if (diffViewMode === 'detail') return <RouteDetailView diffedShapes={diffedShapes} />;
+  // Split layout stays mounted while a line is focused — its panes filter
+  // down to just that line (old shape left, new shape right) instead of
+  // handing off to the single-map `RouteDetailView`, which only makes sense
+  // for the 'single' layout.
+  if (diffViewMode === 'detail' && diffOverviewLayout !== 'split') {
+    return <RouteDetailView diffedShapes={diffedShapes} />;
+  }
   return diffOverviewLayout === 'split'
     ? <SplitMapView diffedShapes={diffedShapes} />
     : <NetworkDiffMapView diffedShapes={diffedShapes} />;

@@ -7,8 +7,8 @@ export const MODES: Mode[] = ['rail', 'metro', 'tram', 'bus', 'other'];
 
 export const MODE_LABEL: Record<Mode, string> = {
   rail: 'Rail',
-  metro: 'Metro / U-Bahn',
-  tram: 'Tram / Straßenbahn',
+  metro: 'Metro',
+  tram: 'Tram',
   bus: 'Bus',
   other: 'Other / Unknown',
 };

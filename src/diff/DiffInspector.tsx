@@ -24,6 +24,8 @@ import { SEGMENT_COLOR } from '../gtfs/segment-graph';
 import { InspectorSection, LinePill, StopPill, ModeSwatch } from '../inspector/components';
 import { MODE_LABEL } from '../gtfs/modes';
 import { useDiffLinesForStop, useDiffStopsForRoute, type DiffRouteDirection, type DiffStopRow } from '../inspector/diff-data';
+import { useLineDirections } from './useLineDirections';
+import { getOrComputeFrequencyDiff, type RouteFrequencyEntry } from './frequency';
 
 export default function DiffInspector() {
   const activeFeedId = useAppStore((s) => s.activeFeedId);
@@ -165,6 +167,7 @@ function DiffStopCard({
   const setDiffStopFocus = useAppStore((s) => s.setDiffStopFocus);
   const setDiffRouteFocus = useAppStore((s) => s.setDiffRouteFocus);
   const diffRouteFocus = useAppStore((s) => s.diffRouteFocus);
+  const requestDiffRouteZoom = useAppStore((s) => s.requestDiffRouteZoom);
 
   const linesState = useDiffLinesForStop(entry.canonicalId, feedA, feedB, result);
   const lines = linesState.status === 'ready' ? linesState.value : [];
@@ -256,7 +259,10 @@ function DiffStopCard({
                 }}
                 status={l.status}
                 selected={l.canonicalId === diffRouteFocus}
-                onClick={() => setDiffRouteFocus(l.canonicalId)}
+                onClick={() => {
+                  setDiffRouteFocus(l.canonicalId);
+                  requestDiffRouteZoom();
+                }}
               />
             ))}
           </div>
@@ -324,9 +330,20 @@ function DiffRouteCard({
   const diffRouteCandidates = useAppStore((s) => s.diffRouteCandidates);
   const diffRouteFocusGeomStatus = useAppStore((s) => s.diffRouteFocusGeomStatus);
   const requestDiffRouteZoom = useAppStore((s) => s.requestDiffRouteZoom);
+  const diffViewMode = useAppStore((s) => s.diffViewMode);
+  const setDiffViewMode = useAppStore((s) => s.setDiffViewMode);
   const diffRoutesWithGeomChange = useAppStore((s) => s.diffRoutesWithGeomChange);
+  const analysisMode = useAppStore((s) => s.analysisMode);
+  const frequencyEntry = useFrequencyEntry(analysisMode === 'frequency' ? result : null, entry.canonicalId);
   const geomChangedElsewhere =
     entry.status === 'unchanged' && !!diffRoutesWithGeomChange?.has(entry.canonicalId);
+
+  const diffDirectionFocus = useAppStore((s) => s.diffDirectionFocus);
+  const setDiffDirectionFocus = useAppStore((s) => s.setDiffDirectionFocus);
+  const diffRouteDirections = useAppStore((s) => s.diffRouteDirections);
+  const isolableDirections = diffRouteDirections?.get(entry.canonicalId) ?? [];
+  // Same headsign lookup the line-tab sidebar uses for its direction sub-rows.
+  const { headsigns } = useLineDirections(entry, feedA, feedB, isolableDirections.length > 0);
 
   const otherCandidates = diffRouteCandidates
     .filter((cid) => cid !== entry.canonicalId)
@@ -366,6 +383,16 @@ function DiffRouteCard({
             title="Zoom the map to this line's full extent"
           >
             Show full line
+          </button>
+          <button
+            type="button"
+            className={`inspector-card-icon-btn${diffViewMode === 'detail' ? ' on' : ''}`}
+            onClick={() => setDiffViewMode(diffViewMode === 'detail' ? 'overview' : 'detail')}
+            title={diffViewMode === 'detail' ? 'Showing only this line — click to show all lines' : 'Isolate this line — hide all others'}
+            aria-label="Toggle isolating this line"
+            aria-pressed={diffViewMode === 'detail'}
+          >
+            <i className="fa-solid fa-magnifying-glass" aria-hidden />
           </button>
           <button
             type="button"
@@ -428,6 +455,52 @@ function DiffRouteCard({
               />
             ))}
           </div>
+        </InspectorSection>
+      )}
+
+      {isolableDirections.length > 0 && (
+        <InspectorSection title="Directions" count={isolableDirections.length}>
+          <div className="line-list-subrows" style={{ margin: '4px 0', paddingLeft: 0, borderLeft: 'none' }}>
+            <button
+              type="button"
+              className={`line-list-subrow${diffDirectionFocus == null ? ' selected' : ''}`}
+              onClick={() => setDiffDirectionFocus(null)}
+            >
+              <span className="line-list-subrow-dir">Entire line</span>
+            </button>
+            {isolableDirections.map((id) => (
+              <button
+                key={id}
+                type="button"
+                className={`line-list-subrow${diffDirectionFocus === id ? ' selected' : ''}`}
+                onClick={() => setDiffDirectionFocus(id)}
+              >
+                <span className="line-list-subrow-dir">Dir {id}</span>
+                <span className="line-list-subrow-headsign">{headsigns.get(id) || '—'}</span>
+              </button>
+            ))}
+          </div>
+        </InspectorSection>
+      )}
+
+      {frequencyEntry && (
+        <InspectorSection title="Analysis">
+          <table className="diff-ab-table">
+            <tbody>
+              <tr>
+                <td className="muted">Trips/week A</td>
+                <td>{frequencyEntry.tripsPerWeekA}</td>
+              </tr>
+              <tr>
+                <td className="muted">Trips/week B</td>
+                <td>{frequencyEntry.tripsPerWeekB}</td>
+              </tr>
+              <tr className={frequencyEntry.delta !== 0 ? 'changed' : ''}>
+                <td className="muted">Delta</td>
+                <td>{frequencyEntry.delta > 0 ? '+' : ''}{frequencyEntry.delta}</td>
+              </tr>
+            </tbody>
+          </table>
         </InspectorSection>
       )}
 
@@ -524,7 +597,7 @@ function DirectionPairBody({
               <span title={course.headsignB}>B → {course.headsignB || '—'}</span>
             </div>
             <div className="muted route-course-trips">
-              ~{course.tripCountA.toLocaleString()} A trips · ~{course.tripCountB.toLocaleString()} B trips
+              ~{course.tripCountA} A trips · ~{course.tripCountB} B trips
             </div>
           </div>
           {totalCourses > 1 && (
@@ -648,6 +721,28 @@ function RouteSideTable({
       </tbody>
     </table>
   );
+}
+
+/**
+ * The focused route's frequency-diff entry, only computed/read while the
+ * Analysis toolbox's Frequency mode is active (`result` is passed as `null`
+ * otherwise). Shares `getOrComputeFrequencyDiff`'s cache with the map views,
+ * so this never re-runs the underlying queries.
+ */
+function useFrequencyEntry(result: DiffResult | null, canonicalId: string): RouteFrequencyEntry | null {
+  const [entry, setEntry] = useState<RouteFrequencyEntry | null>(null);
+  useEffect(() => {
+    if (!result) { setEntry(null); return; }
+    let cancelled = false;
+    getOrComputeFrequencyDiff(result)
+      .then((r) => {
+        if (cancelled) return;
+        setEntry(r.entries.find((e) => e.canonicalId === canonicalId) ?? null);
+      })
+      .catch((err) => console.warn('inspector frequency lookup failed', err));
+    return () => { cancelled = true; };
+  }, [result, canonicalId]);
+  return entry;
 }
 
 // ---- helpers ---------------------------------------------------------------

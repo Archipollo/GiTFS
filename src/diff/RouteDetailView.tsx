@@ -1,8 +1,8 @@
 // Per-route detail view: a single MapLibre instance fit to the focused
 // route's shapes, with a Colored / Old shape / New shape mode switch, plus
-// the stop-diff markers and frequency overlay scoped to just this route
-// (these moved out of the split overview to keep both of its map instances
-// lightweight — see the plan's decision on stops/frequency scope).
+// the stop-diff markers scoped to just this route. The frequency overlay
+// (toggled globally via the Analysis menu, `analysisMode`) is network-wide,
+// same as the network/split overview.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import maplibregl, { Map as MapLibreMap } from 'maplibre-gl';
@@ -21,17 +21,23 @@ import {
   diffMoveArrows,
   filterStopsByRouteMembership,
 } from './geojson';
-import { getOrComputeFrequencyDiff, frequencyDiffToGeoJSON, type FrequencyDiffResult } from './frequency';
+import { getOrComputeFrequencyDiff, frequencyDiffToGeoJSON, filterFrequencyDiff, type FrequencyDiffResult } from './frequency';
+import { FrequencyLegend } from './FrequencyLegend';
 import {
   createDiffMapStyle,
   addDiffFrequencyLayers,
+  frequencyColorExpr,
   addDiffSegmentLayers,
   addDiffStopLayers,
+  attachDiffFrequencyClickHandler,
   attachDiffStopClickHandler,
+  setDiffRouteHighlight,
   setDiffStopHighlight,
   emptyFC,
   filterFeaturesNearRoute,
   setSource,
+  ALL_SEGMENT_STATUSES_VISIBLE,
+  ALL_STOP_STATUSES_VISIBLE,
 } from './diffMapLayers';
 import { usePersistedCamera } from '../map/usePersistedCamera';
 
@@ -42,12 +48,6 @@ const GEOM_LEGEND: Array<{ id: 'unchanged' | 'removed' | 'added' | 'changed'; la
   { id: 'removed', label: 'Removed' },
   { id: 'added', label: 'Added' },
   { id: 'changed', label: 'Rerouted' },
-];
-
-const FREQUENCY_LEGEND: Array<{ id: string; label: string; color: string }> = [
-  { id: 'down', label: 'Frequency decreased', color: '#ea580c' },
-  { id: 'flat', label: 'Frequency unchanged', color: '#475569' },
-  { id: 'up', label: 'Frequency increased', color: '#2563eb' },
 ];
 
 const INITIAL_CENTER: [number, number] = [14.55, 47.6];
@@ -87,8 +87,9 @@ export function RouteDetailView({ diffedShapes }: { diffedShapes: DiffedShapes |
   const toggleDiffStopVisibility = useAppStore((s) => s.toggleDiffStopVisibility);
   const diffStopLabels = useAppStore((s) => s.diffStopLabels);
   const toggleDiffStopLabels = useAppStore((s) => s.toggleDiffStopLabels);
-  const diffOverlay = useAppStore((s) => s.diffOverlay);
-  const setDiffOverlay = useAppStore((s) => s.setDiffOverlay);
+  const analysisMode = useAppStore((s) => s.analysisMode);
+  const frequencyIncludeAddedRemoved = useAppStore((s) => s.frequencyIncludeAddedRemoved);
+  const frequencyClassMode = useAppStore((s) => s.frequencyClassMode);
   const diffDirectionFocus = useAppStore((s) => s.diffDirectionFocus);
   const setDiffDirectionFocus = useAppStore((s) => s.setDiffDirectionFocus);
   const diffRouteDirections = useAppStore((s) => s.diffRouteDirections);
@@ -195,7 +196,11 @@ export function RouteDetailView({ diffedShapes }: { diffedShapes: DiffedShapes |
       addDiffSegmentLayers(map);
       // Focused line mode: names show at any zoom (map is scoped to one line).
       addDiffStopLayers(map, { labelMinZoom: 0 });
-      addDiffFrequencyLayers(map);
+      addDiffFrequencyLayers(map, useAppStore.getState().frequencyClassMode);
+      // Frequency here is network-wide (see the comment above), so clicking a
+      // different line while it's active should re-focus the inspector onto
+      // that line rather than being a no-op.
+      attachDiffFrequencyClickHandler(map, setDiffRouteFocus);
       attachDiffStopClickHandler(map, setDiffStopFocus);
       fitToRoute();
       setReady(true);
@@ -236,7 +241,7 @@ export function RouteDetailView({ diffedShapes }: { diffedShapes: DiffedShapes |
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready) return;
-    if (!diffedShapes || !diffRouteFocus || diffOverlay !== 'geometry') {
+    if (!diffedShapes || !diffRouteFocus || analysisMode === 'frequency') {
       setSource(map, 'diff-segments', emptyFC());
       return;
     }
@@ -280,23 +285,39 @@ export function RouteDetailView({ diffedShapes }: { diffedShapes: DiffedShapes |
       }
     }
     setSource(map, 'diff-segments', features);
-  }, [diffedShapes, diffRouteFocus, diffDirectionFocus, diffDetailMode, diffOverlay, runLineStatus, ready]);
+  }, [diffedShapes, diffRouteFocus, diffDirectionFocus, diffDetailMode, analysisMode, runLineStatus, ready]);
 
-  // Frequency overlay, scoped to this route — only populated in 'frequency' mode.
+  // Always-on geometry backing the focused route's glow — every status, both
+  // feeds, unfiltered by direction/mode — used only in frequency mode (see
+  // below): that's the one case where the network-wide frequency overlay
+  // draws other routes too, so a glow around this one is actually useful;
+  // in geometry mode the map already shows nothing but this route.
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready) return;
-    if (!frequency || !diffRouteFocus || diffOverlay !== 'frequency') {
+    if (!diffedShapes || !diffRouteFocus) { setSource(map, 'diff-segments-focus-data', emptyFC()); return; }
+    const { features } = segmentDiffToGeoJSON(
+      diffedShapes,
+      ALL_SEGMENT_STATUSES_VISIBLE,
+      (r) => r.canonicalId === diffRouteFocus,
+      runLineStatus,
+    );
+    setSource(map, 'diff-segments-focus-data', features);
+  }, [diffedShapes, diffRouteFocus, runLineStatus, ready]);
+
+  // Frequency overlay — network-wide (not scoped to just this route), same
+  // data path as the network/split overview so panning out shows the full
+  // picture instead of just the focused line's delta.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    if (!frequency || analysisMode !== 'frequency') {
       setSource(map, 'diff-frequency', emptyFC());
       return;
     }
-    const fc = frequencyDiffToGeoJSON(frequency);
-    const routeOnly: GeoJSON.FeatureCollection = {
-      type: 'FeatureCollection',
-      features: fc.features.filter((f) => f.properties?.canonicalId === diffRouteFocus),
-    };
-    setSource(map, 'diff-frequency', routeOnly);
-  }, [frequency, diffRouteFocus, diffOverlay, ready]);
+    setSource(map, 'diff-frequency', frequencyDiffToGeoJSON(filterFrequencyDiff(frequency, frequencyIncludeAddedRemoved)));
+    map.setPaintProperty('diff-frequency-line', 'line-color', frequencyColorExpr(frequencyClassMode));
+  }, [frequency, analysisMode, ready, frequencyIncludeAddedRemoved, frequencyClassMode]);
 
   // Stop-diff, scoped to this route's stops. Stop entries don't carry a route
   // id, so membership is narrowed two ways: first to the actual `stop_id`s
@@ -333,6 +354,16 @@ export function RouteDetailView({ diffedShapes }: { diffedShapes: DiffedShapes |
       : emptyFC());
   }, [diffStatus, diffRouteFocus, diffStopVisibility, diffDetailMode, modeRuns, routeStopIds, ready]);
 
+  // Always-on stop points backing the focused stop's halo — every status,
+  // unfiltered by the checkboxes (frequency mode zeroes them all), so the
+  // halo survives switching into analysis view.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    if (diffStatus.kind !== 'ready') { setSource(map, 'diff-stops-focus-data', emptyFC()); return; }
+    setSource(map, 'diff-stops-focus-data', diffStopPoints(diffStatus.result, ALL_STOP_STATUSES_VISIBLE));
+  }, [diffStatus, ready]);
+
   // Station-name labels on/off.
   useEffect(() => {
     const map = mapRef.current;
@@ -340,11 +371,19 @@ export function RouteDetailView({ diffedShapes }: { diffedShapes: DiffedShapes |
     map.setLayoutProperty('diff-stops-labels', 'visibility', diffStopLabels ? 'visible' : 'none');
   }, [diffStopLabels, ready]);
 
-  // Violet halo on the inspector-focused stop. No route glow here — the map is
-  // already scoped to the focused line, so highlighting it would tint everything.
+  // Violet halo on the inspector-focused stop.
   useEffect(() => {
     if (mapRef.current && ready) setDiffStopHighlight(mapRef.current, diffStopFocus);
   }, [diffStopFocus, ready]);
+
+  // Route glow, only in frequency mode: the network-wide frequency overlay
+  // draws every route, so highlighting this one helps it stand out. In
+  // geometry mode the map already shows nothing but this route, so a glow
+  // around it would just tint everything for no benefit.
+  useEffect(() => {
+    if (!mapRef.current || !ready) return;
+    setDiffRouteHighlight(mapRef.current, analysisMode === 'frequency' ? diffRouteFocus : null);
+  }, [diffRouteFocus, analysisMode, ready]);
 
   if (!entry) return null;
 
@@ -395,19 +434,7 @@ export function RouteDetailView({ diffedShapes }: { diffedShapes: DiffedShapes |
           </div>
         )}
         <div className="route-detail-header-side route-detail-header-right">
-          <div className="route-detail-mode-switch">
-            {(['geometry', 'frequency'] as const).map((overlay) => (
-              <button
-                key={overlay}
-                type="button"
-                className={diffOverlay === overlay ? 'on' : 'off'}
-                onClick={() => setDiffOverlay(overlay)}
-              >
-                {overlay === 'geometry' ? 'Geometry' : 'Frequency'}
-              </button>
-            ))}
-          </div>
-          {diffOverlay === 'geometry' && (
+          {analysisMode !== 'frequency' && (
             <div className="route-detail-mode-switch">
               {(['colored', 'old', 'new'] as DetailMode[]).map((mode) => (
                 <button
@@ -426,8 +453,9 @@ export function RouteDetailView({ diffedShapes }: { diffedShapes: DiffedShapes |
       <div className="route-detail-map">
         <div ref={containerRef} className="route-detail-map-canvas" />
         <div className="map-mode-legend route-detail-legend">
-          {diffOverlay === 'geometry'
-            ? diffDetailMode === 'colored'
+          {analysisMode === 'frequency'
+            ? <FrequencyLegend />
+            : diffDetailMode === 'colored'
               ? GEOM_LEGEND.map(({ id, label: legendLabel }) => (
                   <span key={id} className="diff-count on" style={{ pointerEvents: 'none' }}>
                     <span className="diff-count-swatch diff-count-swatch--line" style={{ background: SEGMENT_COLOR[id] }} />
@@ -439,14 +467,8 @@ export function RouteDetailView({ diffedShapes }: { diffedShapes: DiffedShapes |
                     <span className="diff-count-swatch diff-count-swatch--line" style={{ background: SEGMENT_COLOR.unchanged }} />
                     <span className="diff-count-label">{diffDetailMode === 'old' ? 'Old route' : 'New route'}</span>
                   </span>
-                )
-            : FREQUENCY_LEGEND.map(({ id, label: legendLabel, color }) => (
-                <span key={id} className="diff-count on" style={{ pointerEvents: 'none' }}>
-                  <span className="diff-count-swatch diff-count-swatch--line" style={{ background: color }} />
-                  <span className="diff-count-label">{legendLabel}</span>
-                </span>
-              ))}
-          {STOP_LEGEND.map(({ id, label: legendLabel }) => (
+                )}
+          {analysisMode !== 'frequency' && STOP_LEGEND.map(({ id, label: legendLabel }) => (
             <label key={id} className={`diff-count ${diffStopVisibility[id] ? 'on' : 'off'}`}>
               <input
                 type="checkbox"
@@ -457,11 +479,13 @@ export function RouteDetailView({ diffedShapes }: { diffedShapes: DiffedShapes |
               <span className="diff-count-label">{legendLabel}</span>
             </label>
           ))}
-          <label className={`diff-count ${diffStopLabels ? 'on' : 'off'}`}>
-            <input type="checkbox" checked={diffStopLabels} onChange={toggleDiffStopLabels} />
-            <span className="diff-count-swatch diff-count-swatch--label">A</span>
-            <span className="diff-count-label">Station names</span>
-          </label>
+          {analysisMode !== 'frequency' && (
+            <label className={`diff-count ${diffStopLabels ? 'on' : 'off'}`}>
+              <input type="checkbox" checked={diffStopLabels} onChange={toggleDiffStopLabels} />
+              <span className="diff-count-swatch diff-count-swatch--label">A</span>
+              <span className="diff-count-label">Station names</span>
+            </label>
+          )}
         </div>
       </div>
     </div>

@@ -219,7 +219,7 @@ async function tableExists(
   return row.n > 0;
 }
 
-async function columnExists(
+export async function columnExists(
   conn: Awaited<ReturnType<typeof getConnection>>,
   feedId: string,
   stem: string,
@@ -697,15 +697,112 @@ export async function fetchRouteWeeklyTrips(
 }
 
 /**
- * The most-common shape's coordinates for each route_id — a single
- * representative polyline per route, used to draw the diff-mode frequency
- * overlay (one line per route rather than one per shape variant).
+ * Total estimated scheduled trips/week across the whole feed — a single
+ * scalar, not a per-route breakdown. Used by the Timeline view's trend
+ * chart, which needs one number per loaded feed (not a pairwise diff), so
+ * this skips the `GROUP BY route_id` / route-id filter that
+ * `fetchRouteWeeklyTrips` needs for its per-route use case.
+ */
+export async function fetchFeedTotalWeeklyTrips(feedId: string): Promise<number> {
+  await ensureFeedTablesLoaded(feedId);
+  const conn = await getConnection();
+  try {
+    if (!(await tableExists(conn, feedId, 'trips'))) return 0;
+    const trips = qualifiedTable(feedId, 'trips.txt');
+    const hasCalendar = await tableExists(conn, feedId, 'calendar');
+
+    const sql = hasCalendar
+      ? `
+        SELECT SUM(c.wk)::DOUBLE AS n
+        FROM ${trips} t
+        JOIN (
+          SELECT service_id,
+                 (CAST(monday AS INTEGER) + CAST(tuesday AS INTEGER) + CAST(wednesday AS INTEGER)
+                  + CAST(thursday AS INTEGER) + CAST(friday AS INTEGER) + CAST(saturday AS INTEGER)
+                  + CAST(sunday AS INTEGER)) AS wk
+          FROM ${qualifiedTable(feedId, 'calendar.txt')}
+        ) c ON c.service_id = t.service_id
+      `
+      : `SELECT COUNT(*)::DOUBLE AS n FROM ${trips}`;
+    const res = await conn.query(sql);
+    const row = res.toArray()[0];
+    return Number(row?.n ?? 0);
+  } finally {
+    await conn.close();
+  }
+}
+
+/**
+ * Scheduled departures per stop, 6:00-20:00, on a representative weekday
+ * (Wednesday — least likely to fall on a reduced-service/holiday schedule).
+ * Used by the ÖV-Güteklassen analysis layer's stop-interval computation
+ * (see gtfs/gueteklassen.ts). Mirrors `fetchRouteWeeklyTrips`'s
+ * calendar-aware branching: feeds without `calendar.txt` fall back to a
+ * plain per-stop departure count within the time window (no weekday
+ * filtering possible), so the overlay still renders at the cost of not
+ * being a literal "one representative weekday" figure.
+ */
+export async function fetchStopPeakWindowDepartures(feedId: string): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  await ensureFeedTablesLoaded(feedId);
+  const conn = await getConnection();
+  try {
+    const hasStopTimes = await tableExists(conn, feedId, 'stop_times');
+    const hasTrips = await tableExists(conn, feedId, 'trips');
+    if (!hasStopTimes || !hasTrips) return out;
+    // Feeds persisted before departure_time was added to stop_times'
+    // narrow ingest projection (see ingest.ts) won't have this column until
+    // re-uploaded — degrade to "no data" rather than erroring.
+    if (!(await columnExists(conn, feedId, 'stop_times', 'departure_time'))) return out;
+    const st = qualifiedTable(feedId, 'stop_times.txt');
+    const tr = qualifiedTable(feedId, 'trips.txt');
+    const hasCalendar = await tableExists(conn, feedId, 'calendar');
+
+    // GTFS times aren't reliably zero-padded (e.g. "6:00:00" is valid), so a
+    // lexical string BETWEEN would misorder them against '06:00:00' — parse
+    // to minutes-since-midnight instead. SPLIT_PART's 1-indexed parts give
+    // hour/minute; a time past midnight (e.g. "25:00:00") still compares
+    // correctly since minutes just keep counting up past 1440.
+    const minutesExpr = (col: string) =>
+      `TRY_CAST(SPLIT_PART(${col}, ':', 1) AS INTEGER) * 60 + TRY_CAST(SPLIT_PART(${col}, ':', 2) AS INTEGER)`;
+    const windowClause = `${minutesExpr('st.departure_time')} BETWEEN 360 AND 1200`;
+    const sql = hasCalendar
+      ? `
+        SELECT st.stop_id AS stop_id, COUNT(*)::INTEGER AS n
+        FROM ${st} st
+        JOIN ${tr} t ON st.trip_id = t.trip_id
+        JOIN ${qualifiedTable(feedId, 'calendar.txt')} c ON c.service_id = t.service_id
+        WHERE ${windowClause} AND CAST(c.wednesday AS INTEGER) = 1
+        GROUP BY st.stop_id
+      `
+      : `
+        SELECT st.stop_id AS stop_id, COUNT(*)::INTEGER AS n
+        FROM ${st} st
+        WHERE ${windowClause}
+        GROUP BY st.stop_id
+      `;
+    const res = await conn.query(sql);
+    for (const row of res.toArray()) {
+      out.set(String(row.stop_id), Number(row.n ?? 0));
+    }
+    return out;
+  } finally {
+    await conn.close();
+  }
+}
+
+/**
+ * Every distinct shape's coordinates for each route_id, grouped by route —
+ * used to draw the frequency overlay. A route with branches or a looped
+ * variant has multiple shape_ids; using only the single most-tripped one
+ * would leave the branch/loop undrawn, so all variants are returned and
+ * rendered together as one multi-line feature per route.
  */
 export async function fetchRouteRepresentativeShapes(
   feedId: string,
   routeIds: string[],
-): Promise<Map<string, [number, number][]>> {
-  const out = new Map<string, [number, number][]>();
+): Promise<Map<string, [number, number][][]>> {
+  const out = new Map<string, [number, number][][]>();
   if (routeIds.length === 0) return out;
   await ensureFeedTablesLoaded(feedId);
   const conn = await getConnection();
@@ -719,34 +816,28 @@ export async function fetchRouteRepresentativeShapes(
     const inList = routeIds.map((id) => sqlStr(id)).join(', ');
 
     const res = await conn.query(`
-      WITH counts AS (
-        SELECT route_id, shape_id, COUNT(*) AS n
-        FROM ${trips}
-        WHERE route_id IN (${inList}) AND shape_id IS NOT NULL
-        GROUP BY route_id, shape_id
-      ),
-      best AS (
-        SELECT route_id, shape_id FROM (
-          SELECT route_id, shape_id,
-                 ROW_NUMBER() OVER (PARTITION BY route_id ORDER BY n DESC) AS rn
-          FROM counts
-        ) ranked
-        WHERE rn = 1
-      )
-      SELECT best.route_id AS route_id,
+      SELECT DISTINCT t.route_id AS route_id, t.shape_id AS shape_id,
              TRY_CAST(s.shape_pt_lon AS DOUBLE) AS lon,
              TRY_CAST(s.shape_pt_lat AS DOUBLE) AS lat,
              TRY_CAST(s.shape_pt_sequence AS INTEGER) AS seq
-      FROM best
-      JOIN ${shapes} s ON s.shape_id = best.shape_id
-      WHERE TRY_CAST(s.shape_pt_lon AS DOUBLE) IS NOT NULL
-      ORDER BY best.route_id, seq
+      FROM ${trips} t
+      JOIN ${shapes} s ON s.shape_id = t.shape_id
+      WHERE t.route_id IN (${inList}) AND t.shape_id IS NOT NULL
+        AND TRY_CAST(s.shape_pt_lon AS DOUBLE) IS NOT NULL
+      ORDER BY t.route_id, t.shape_id, seq
     `);
+    const byRouteShape = new Map<string, Map<string, [number, number][]>>();
     for (const row of res.toArray()) {
       const routeId = String(row.route_id);
-      let arr = out.get(routeId);
-      if (!arr) { arr = []; out.set(routeId, arr); }
+      const shapeId = String(row.shape_id);
+      let byShape = byRouteShape.get(routeId);
+      if (!byShape) { byShape = new Map(); byRouteShape.set(routeId, byShape); }
+      let arr = byShape.get(shapeId);
+      if (!arr) { arr = []; byShape.set(shapeId, arr); }
       arr.push([row.lon as number, row.lat as number]);
+    }
+    for (const [routeId, byShape] of byRouteShape) {
+      out.set(routeId, [...byShape.values()]);
     }
     return out;
   } finally {

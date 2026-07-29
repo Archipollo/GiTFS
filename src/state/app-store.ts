@@ -4,6 +4,11 @@ import { removeFeedFromOPFS } from '../gtfs/opfs';
 import type { StopStatus, RouteStatus } from '../diff/engine';
 import type { GeomStatus } from '../gtfs/segment-graph';
 import { yearOfFeed } from '../timeline/math';
+import type { PopulationSummary } from '../gtfs/population';
+import type { GueteklassenSummary } from '../gtfs/gueteklassen';
+import type { GueteklassenChangeSummary } from '../diff/gueteklassen';
+import type { FrequencyClassMode } from '../diff/frequency';
+import type { PopulationClassMode } from '../diff/population';
 
 export interface FeedMeta {
   id: string;
@@ -80,6 +85,11 @@ export interface MapCamera {
   pitch: number;
 }
 
+/** The active analysis overlay — see the doc comment on `analysisMode`
+ * below for what each mode does. Exported so every consumer (menu, map
+ * views) can share one union instead of repeating it inline. */
+export type AnalysisMode = 'none' | 'frequency' | 'population' | 'gueteklassen';
+
 export interface AppState {
   /** Re-runs the oldest/newest-feed diff-pair auto-pick, run once at boot and
    *  whenever the loaded feed set changes. */
@@ -153,6 +163,60 @@ export interface AppState {
   timelineFeedId: string | null;
   setTimelineFeedId: (feedId: string | null) => void;
 
+  /** Whether the timeline is auto-advancing through feed-years. */
+  timelinePlaying: boolean;
+  setTimelinePlaying: (v: boolean) => void;
+  /** Milliseconds between auto-advance steps while playing. */
+  timelinePlaybackSpeedMs: number;
+  setTimelinePlaybackSpeedMs: (ms: number) => void;
+
+  /**
+   * The persistent "Feed A" selection from the top bar — shared by every
+   * layout (single/split treat it as the older side of the A/B diff;
+   * timeline treats it as the baseline for the added-since-baseline
+   * overlay). Null until a feed set is loaded, at which point it snaps to
+   * the earliest one. Deliberately independent of `activeFeedId`, which in
+   * timeline layout instead mirrors the scrub cursor — keeping this field
+   * separate is what lets Feed A survive switching layouts and scrubbing.
+   */
+  feedASelection: string | null;
+  setFeedASelection: (feedId: string | null) => void;
+  /**
+   * When true, the diff (map overlay, change panel, trend chart) compares
+   * the baseline feed to the current one ("cumulative since baseline").
+   * When false, it compares the previous loaded feed-year to the current
+   * one instead ("this step only"). Shared across every timeline consumer
+   * so they stay in sync.
+   */
+  timelineCumulativeMode: boolean;
+  setTimelineCumulativeMode: (v: boolean) => void;
+  /** Highlight stops/routes added (per `timelineCumulativeMode`) on the map. */
+  timelineHighlightGrowth: boolean;
+  setTimelineHighlightGrowth: (v: boolean) => void;
+  /** Highlight stops/routes removed (per `timelineCumulativeMode`) on the map. */
+  timelineHighlightLoss: boolean;
+  setTimelineHighlightLoss: (v: boolean) => void;
+  /** Highlight lines whose geometry (not identity) differs from baseline. */
+  timelineHighlightReroutes: boolean;
+  setTimelineHighlightReroutes: (v: boolean) => void;
+  /**
+   * When true (default), cumulative-mode growth/loss highlights and counts
+   * reflect *net* change since baseline — a stop added then later removed
+   * nets out and isn't shown. When false, they show every add/remove event
+   * across the chain (gross churn), including reversals. Step mode is
+   * unaffected (net and gross are identical for a single year-over-year diff).
+   */
+  timelineNetChangesMode: boolean;
+  setTimelineNetChangesMode: (v: boolean) => void;
+
+  /**
+   * Bumped to signal "export the current map frame now" — the export button
+   * lives in the right panel (`TimelineChangePanel`) but the live MapLibre
+   * instance is only held by `MapView`, so this bridges the two.
+   */
+  mapSnapshotRequestId: number;
+  requestMapSnapshot: () => void;
+
   /** Pinned canonical entities whose histories are shown in the inspector across years. */
   pinnedEntities: PinnedEntity[];
   addPinnedEntity: (p: PinnedEntity) => void;
@@ -176,18 +240,59 @@ export interface AppState {
   diffSegmentVisibility: Record<GeomStatus, boolean>;
   toggleDiffSegmentVisibility: (s: GeomStatus) => void;
   /**
-   * Which overlay the diff-mode map shows for lines: geometry changes
-   * (added/removed/unchanged track, via `diffSegmentVisibility`) or the
-   * frequency overlay (trips/week gained or lost per route). Mutually
-   * exclusive — both drawn from overlapping shape data, so showing both
-   * at once would be unreadable.
+   * The active analysis overlay, available from every view (network overview,
+   * split view, route detail, and plain single-feed/timeline browsing) via the
+   * global Analysis menu in the top bar — not tied to diff mode. `'none'`
+   * means the ordinary geometry/status rendering is shown. An extensible
+   * string union so a future mode (e.g. `'population'`) slots in without
+   * touching any consumer's plumbing.
+   *
+   * Where a diff pair exists, `'frequency'` shows the trips/week gained or
+   * lost per route (mutually exclusive with the geometry-diff overlay — both
+   * drawn from overlapping shape data, so showing both at once would be
+   * unreadable). Where there's no diff pair (single-feed/timeline view),
+   * `'frequency'` shows each route's absolute trips/week instead.
    */
-  diffOverlay: 'geometry' | 'frequency';
-  setDiffOverlay: (o: 'geometry' | 'frequency') => void;
+  analysisMode: AnalysisMode;
+  setAnalysisMode: (m: AnalysisMode) => void;
   /**
-   * Frequency-overlay legend data, updated by the map after it computes the
-   * trips/week diff — mirrors `diffSegmentSummary`'s "compute once on the
-   * map, read from the sidebar" split.
+   * Which dataset backs the population overlay: `'ghs'` (GHS-POP global
+   * raster, default — the only source with a year-over-year series, so it's
+   * what diff mode's gained/lost overlay uses) or `'zsp'` (Statistik
+   * Austria's Zählsprengel registry counts on real boundaries — Austria-only,
+   * a single current snapshot with no per-feed-year comparison). See
+   * gtfs/zaehlsprengel.ts.
+   */
+  populationSource: 'ghs' | 'zsp';
+  setPopulationSource: (s: 'ghs' | 'zsp') => void;
+  /**
+   * Whether added/removed routes (100%-swing deltas, since one side is 0)
+   * are included in the diff-mode frequency overlay's scale and rendering.
+   * Off by default — they otherwise stretch the scale so far that real
+   * frequency changes render thin and washed-out.
+   */
+  frequencyIncludeAddedRemoved: boolean;
+  setFrequencyIncludeAddedRemoved: (v: boolean) => void;
+  /**
+   * Which fixed scale classifies a route's frequency change: relative to its
+   * own baseline (percent) or a flat trips/week amount. Both use fixed
+   * breakpoints, so switching this (or `frequencyIncludeAddedRemoved`) never
+   * shifts the legend's class boundaries.
+   */
+  frequencyClassMode: FrequencyClassMode;
+  setFrequencyClassMode: (v: FrequencyClassMode) => void;
+  /**
+   * Which fixed scale colours the network-diff population overlay:
+   * loss/gain per cell (`'change'`, the default) or feed B's absolute
+   * density (`'density'`), so a viewer can see general density without
+   * leaving diff mode. Mirrors `frequencyClassMode` above.
+   */
+  populationClassMode: PopulationClassMode;
+  setPopulationClassMode: (v: PopulationClassMode) => void;
+  /**
+   * Frequency-overlay legend data for diff mode, updated by the map after it
+   * computes the trips/week diff — mirrors `diffSegmentSummary`'s "compute
+   * once on the map, read from the sidebar" split.
    */
   diffFrequencySummary:
     | {
@@ -209,6 +314,146 @@ export interface AppState {
         }
       | null,
   ) => void;
+  /**
+   * Frequency-overlay legend data for the no-diff-pair case (single-feed or
+   * timeline browsing): absolute trips/week per route, not a delta.
+   */
+  feedFrequencySummary:
+    | {
+        feedId: string;
+        maxWeeklyTrips: number;
+        scaleWeeklyTrips: number;
+        routeCount: number;
+      }
+    | null;
+  setFeedFrequencySummary: (
+    s:
+      | {
+          feedId: string;
+          maxWeeklyTrips: number;
+          scaleWeeklyTrips: number;
+          routeCount: number;
+        }
+      | null,
+  ) => void;
+  /**
+   * Population-overlay legend data for a diff pair — the per-cell population
+   * delta between feed A's and feed B's nearest GHS-POP year. Mirrors
+   * `diffFrequencySummary`'s "compute once on the map, read from the
+   * sidebar" split.
+   */
+  diffPopulationSummary:
+    | {
+        feedA: string;
+        feedB: string;
+        yearA: number;
+        yearB: number;
+        mode: 'delta' | 'absolute';
+        maxAbsDelta: number;
+        scaleAbsDelta: number;
+        maxPopulation: number;
+        scalePopulation: number;
+        cellCount: number;
+        cellSizeMeters: number;
+      }
+    | null;
+  setDiffPopulationSummary: (
+    s:
+      | {
+          feedA: string;
+          feedB: string;
+          yearA: number;
+          yearB: number;
+          mode: 'delta' | 'absolute';
+          maxAbsDelta: number;
+          scaleAbsDelta: number;
+          maxPopulation: number;
+          scalePopulation: number;
+          cellCount: number;
+          cellSizeMeters: number;
+        }
+      | null,
+  ) => void;
+  /**
+   * Population-overlay legend data for the no-diff-pair case: absolute
+   * population per cell for the active feed's nearest GHS-POP year.
+   */
+  feedPopulationSummary:
+    | {
+        year: number;
+        maxPopulation: number;
+        scalePopulation: number;
+        cellCount: number;
+        cellSizeMeters: number;
+      }
+    | null;
+  setFeedPopulationSummary: (
+    s:
+      | {
+          year: number;
+          maxPopulation: number;
+          scalePopulation: number;
+          cellCount: number;
+          cellSizeMeters: number;
+        }
+      | null,
+  ) => void;
+  /**
+   * Population-overlay legend data for split view's per-pane absolute GHS-POP
+   * display — unlike `diffPopulationSummary`, split view never diffs
+   * population between the two feed years (each pane shows its own year's
+   * raw numbers), so this holds one `PopulationSummary` per side instead of
+   * a single delta/absolute summary. Either side is null until that pane has
+   * finished its own compute.
+   */
+  splitPopulationSummary: { a: PopulationSummary | null; b: PopulationSummary | null };
+  setSplitPopulationSummary: (side: 'a' | 'b', summary: PopulationSummary | null) => void;
+  /**
+   * Population-overlay legend data when `populationSource === 'zsp'` — used
+   * by every view (single-feed, split, network-diff) alike, since the
+   * Zählsprengel source has no per-feed-year diff (see
+   * gtfs/zaehlsprengel.ts).
+   */
+  zaehlsprengelPopulationSummary:
+    | {
+        year: number;
+        maxPopulation: number;
+        scalePopulation: number;
+        unitCount: number;
+      }
+    | null;
+  setZaehlsprengelPopulationSummary: (
+    s:
+      | {
+          year: number;
+          maxPopulation: number;
+          scalePopulation: number;
+          unitCount: number;
+        }
+      | null,
+  ) => void;
+  /**
+   * ÖV-Güteklassen-overlay legend data for the no-diff-pair case: absolute
+   * A-G class counts for the active feed. Mirrors `feedPopulationSummary`.
+   */
+  feedGueteklassenSummary: GueteklassenSummary | null;
+  setFeedGueteklassenSummary: (s: GueteklassenSummary | null) => void;
+  /**
+   * ÖV-Güteklassen-overlay legend data for split view's per-pane absolute
+   * display — like population's split summary, each pane shows its own
+   * feed's classes independently (A-G is ordinal, not subtractable, so
+   * there's no per-cell delta to show instead). Either side is null until
+   * that pane has finished its own compute.
+   */
+  splitGueteklassenSummary: { a: GueteklassenSummary | null; b: GueteklassenSummary | null };
+  setSplitGueteklassenSummary: (side: 'a' | 'b', summary: GueteklassenSummary | null) => void;
+  /**
+   * ÖV-Güteklassen-overlay legend data for the network-diff overview: counts
+   * per categorical change (improved/degraded/unchanged/gained/lost) between
+   * feed A's and feed B's classes.
+   */
+  diffGueteklassenSummary: GueteklassenChangeSummary | null;
+  setDiffGueteklassenSummary: (s: GueteklassenChangeSummary | null) => void;
   /**
    * Per-status total segment length in metres, updated by the map after it
    * builds the segment diff. Lives in the store (rather than being
@@ -369,6 +614,7 @@ function autoPairDiffFeedsPatch(s: AppState): Partial<AppState> {
   return {
     activeFeedId: oldest,
     compareFeedId: newest,
+    feedASelection: oldest,
     inspectorStop: null,
     inspectorRoute: null,
   };
@@ -413,6 +659,7 @@ export const useAppStore = create<AppState>((set) => ({
         feeds: { ...s.feeds, [meta.id]: meta },
         feedOrder: s.feedOrder.includes(meta.id) ? s.feedOrder : [...s.feedOrder, meta.id],
         activeFeedId: s.activeFeedId ?? meta.id,
+        feedASelection: s.feedASelection ?? meta.id,
       };
       // Re-derive the chronological A/B pair against the enlarged feed set: a
       // newly loaded feed can be the new oldest or newest, and leaving the old
@@ -429,6 +676,7 @@ export const useAppStore = create<AppState>((set) => ({
         feedOrder: s.feedOrder.filter((x) => x !== id),
         activeFeedId: s.activeFeedId === id ? null : s.activeFeedId,
         compareFeedId: s.compareFeedId === id ? null : s.compareFeedId,
+        feedASelection: s.feedASelection === id ? null : s.feedASelection,
       };
     });
   },
@@ -487,6 +735,27 @@ export const useAppStore = create<AppState>((set) => ({
   timelineFeedId: null,
   setTimelineFeedId: (timelineFeedId) => set({ timelineFeedId }),
 
+  timelinePlaying: false,
+  setTimelinePlaying: (timelinePlaying) => set({ timelinePlaying }),
+  timelinePlaybackSpeedMs: 1200,
+  setTimelinePlaybackSpeedMs: (timelinePlaybackSpeedMs) => set({ timelinePlaybackSpeedMs }),
+
+  feedASelection: null,
+  setFeedASelection: (feedASelection) => set({ feedASelection }),
+  timelineCumulativeMode: true,
+  setTimelineCumulativeMode: (timelineCumulativeMode) => set({ timelineCumulativeMode }),
+  timelineHighlightGrowth: false,
+  setTimelineHighlightGrowth: (timelineHighlightGrowth) => set({ timelineHighlightGrowth }),
+  timelineHighlightLoss: false,
+  setTimelineHighlightLoss: (timelineHighlightLoss) => set({ timelineHighlightLoss }),
+  timelineHighlightReroutes: false,
+  setTimelineHighlightReroutes: (timelineHighlightReroutes) => set({ timelineHighlightReroutes }),
+  timelineNetChangesMode: true,
+  setTimelineNetChangesMode: (timelineNetChangesMode) => set({ timelineNetChangesMode }),
+
+  mapSnapshotRequestId: 0,
+  requestMapSnapshot: () => set((s) => ({ mapSnapshotRequestId: s.mapSnapshotRequestId + 1 })),
+
   pinnedEntities: [],
   addPinnedEntity: (p) =>
     set((s) => ({
@@ -537,10 +806,69 @@ export const useAppStore = create<AppState>((set) => ({
         [s]: !st.diffSegmentVisibility[s],
       },
     })),
-  diffOverlay: 'geometry',
-  setDiffOverlay: (diffOverlay) => set({ diffOverlay }),
+  analysisMode: 'none',
+  // Stops clutter the frequency overlay's line-color/width encoding, so
+  // entering frequency mode defaults them off — both the single-feed/timeline
+  // toggle (`showStops`) and every per-status diff-mode toggle
+  // (`diffStopVisibility`). The user can still switch them back on via
+  // whichever stops toggle their current view exposes.
+  setAnalysisMode: (analysisMode) =>
+    set((st) => {
+      if (analysisMode === 'frequency') {
+        return {
+          analysisMode,
+          showStops: false,
+          diffStopVisibility: Object.fromEntries(
+            Object.keys(st.diffStopVisibility).map((k) => [k, false]),
+          ) as typeof st.diffStopVisibility,
+        };
+      }
+      // Leaving frequency mode restores the identity-change categories
+      // (added/removed/moved/renamed) that entering it turned off —
+      // `unchanged` stays off, matching its own default.
+      if (st.analysisMode === 'frequency') {
+        return {
+          analysisMode,
+          showStops: true,
+          diffStopVisibility: {
+            ...st.diffStopVisibility,
+            added: true,
+            removed: true,
+            moved: true,
+            renamed: true,
+          },
+        };
+      }
+      return { analysisMode };
+    }),
+  frequencyIncludeAddedRemoved: false,
+  setFrequencyIncludeAddedRemoved: (v) => set({ frequencyIncludeAddedRemoved: v }),
+  frequencyClassMode: 'relative',
+  setFrequencyClassMode: (v) => set({ frequencyClassMode: v }),
+  populationClassMode: 'change',
+  setPopulationClassMode: (v) => set({ populationClassMode: v }),
   diffFrequencySummary: null,
   setDiffFrequencySummary: (diffFrequencySummary) => set({ diffFrequencySummary }),
+  feedFrequencySummary: null,
+  setFeedFrequencySummary: (feedFrequencySummary) => set({ feedFrequencySummary }),
+  populationSource: 'ghs',
+  setPopulationSource: (populationSource) => set({ populationSource }),
+  diffPopulationSummary: null,
+  setDiffPopulationSummary: (diffPopulationSummary) => set({ diffPopulationSummary }),
+  feedPopulationSummary: null,
+  setFeedPopulationSummary: (feedPopulationSummary) => set({ feedPopulationSummary }),
+  splitPopulationSummary: { a: null, b: null },
+  setSplitPopulationSummary: (side, summary) =>
+    set((s) => ({ splitPopulationSummary: { ...s.splitPopulationSummary, [side]: summary } })),
+  zaehlsprengelPopulationSummary: null,
+  setZaehlsprengelPopulationSummary: (zaehlsprengelPopulationSummary) => set({ zaehlsprengelPopulationSummary }),
+  feedGueteklassenSummary: null,
+  setFeedGueteklassenSummary: (feedGueteklassenSummary) => set({ feedGueteklassenSummary }),
+  splitGueteklassenSummary: { a: null, b: null },
+  setSplitGueteklassenSummary: (side, summary) =>
+    set((s) => ({ splitGueteklassenSummary: { ...s.splitGueteklassenSummary, [side]: summary } })),
+  diffGueteklassenSummary: null,
+  setDiffGueteklassenSummary: (diffGueteklassenSummary) => set({ diffGueteklassenSummary }),
   diffSegmentSummary: null,
   setDiffSegmentSummary: (diffSegmentSummary) => set({ diffSegmentSummary }),
   diffStopFocus: null,

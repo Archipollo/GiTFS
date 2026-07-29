@@ -5,10 +5,42 @@
 // cheap relative to the worker-side diff computation itself.
 
 import maplibregl, { type Map as MapLibreMap, type PointLike } from 'maplibre-gl';
-import { SEGMENT_COLOR } from '../gtfs/segment-graph';
+import { SEGMENT_COLOR, type GeomStatus } from '../gtfs/segment-graph';
 import { DIFF_COLOR } from './geojson';
+import type { StopStatus } from './engine';
 import { basemapLayers, basemapSources } from '../map/basemap';
 import { useAppStore } from '../state/app-store';
+import {
+  FREQUENCY_BIG_LOSS_COLOR,
+  FREQUENCY_SMALL_LOSS_COLOR,
+  FREQUENCY_NEUTRAL_COLOR,
+  FREQUENCY_SMALL_GAIN_COLOR,
+  FREQUENCY_BIG_GAIN_COLOR,
+  FREQUENCY_RELATIVE_CLASS_BREAKS,
+  FREQUENCY_ABSOLUTE_CLASS_BREAKS,
+  type FrequencyClassMode,
+} from './frequency';
+import {
+  POPULATION_BIG_LOSS_COLOR,
+  POPULATION_SMALL_LOSS_COLOR,
+  POPULATION_NEUTRAL_COLOR,
+  POPULATION_SMALL_GAIN_COLOR,
+  POPULATION_BIG_GAIN_COLOR,
+  POPULATION_DIFF_CLASS_BREAKS,
+  POPULATION_DIFF_FILL_OPACITY,
+  type PopulationClassMode,
+} from './population';
+import {
+  POPULATION_LOWEST_COLOR,
+  POPULATION_LOW_COLOR,
+  POPULATION_MID_COLOR,
+  POPULATION_HIGH_COLOR,
+  POPULATION_HIGHEST_COLOR,
+  POPULATION_CLASS_BREAKS,
+  POPULATION_FILL_OPACITY,
+} from '../gtfs/population';
+import { GUTEKLASSE_COLOR, GUTEKLASSEN_FILL_OPACITY, GUTEKLASSE_LETTER } from '../gtfs/gueteklassen';
+import { GUETEKLASSEN_CHANGE_COLOR } from './gueteklassen';
 
 /** First layer added by `addDiffSegmentLayers` — the anchor a dynamically
  * inserted basemap (historical satellite) must slot in *below*. This is the
@@ -29,6 +61,21 @@ export const FIRST_DIFF_LAYER_ID = 'diff-segments-focus';
  */
 export const DIFF_FOCUS_COLOR = '#8fb3f0';
 
+/**
+ * Visibility records that hide nothing — for the focus glow/halo layers,
+ * which must keep tracing the inspector-focused route/stop's geometry no
+ * matter what the user has toggled off (status checkboxes) or which overlay
+ * is active (frequency mode empties the regular `diff-segments`/`diff-stops`
+ * sources those toggles gate; the focus layers read from their own always-on
+ * sources instead, see `diff-segments-focus-data`/`diff-stops-focus-data`).
+ */
+export const ALL_SEGMENT_STATUSES_VISIBLE: Record<GeomStatus, boolean> = {
+  added: true, removed: true, unchanged: true, changed: true,
+};
+export const ALL_STOP_STATUSES_VISIBLE: Record<StopStatus, boolean> = {
+  added: true, removed: true, moved: true, renamed: true, unchanged: true,
+};
+
 /** MapLibre filter that matches nothing — the "no focus" state for a highlight layer. */
 const MATCH_NONE: maplibregl.FilterSpecification = ['==', ['literal', 1], ['literal', 0]];
 
@@ -37,11 +84,26 @@ function focusFilter(prop: string, id: string | null): maplibregl.FilterSpecific
   return id ? ['==', ['get', prop], id] : MATCH_NONE;
 }
 
-/** Highlight the focused route's runs (keyed on `canonical_id`); pass `null` to clear. */
-export function setDiffRouteHighlight(map: MapLibreMap, canonicalId: string | null): void {
-  if (map.getLayer('diff-segments-focus')) {
-    map.setFilter('diff-segments-focus', focusFilter('canonical_id', canonicalId));
+/**
+ * Highlight the focused route's runs (keyed on `canonical_id`); pass `null` to
+ * clear. When `directionId` is given, the glow is additionally scoped to that
+ * direction's runs (see the inspector's per-direction focus) instead of the
+ * whole line.
+ */
+export function setDiffRouteHighlight(
+  map: MapLibreMap,
+  canonicalId: string | null,
+  directionId?: number | null,
+): void {
+  if (!map.getLayer('diff-segments-focus')) return;
+  if (!canonicalId) {
+    map.setFilter('diff-segments-focus', MATCH_NONE);
+    return;
   }
+  const filter: maplibregl.FilterSpecification = directionId == null
+    ? ['==', ['get', 'canonical_id'], canonicalId]
+    : ['all', ['==', ['get', 'canonical_id'], canonicalId], ['==', ['get', 'direction_id'], directionId]];
+  map.setFilter('diff-segments-focus', filter);
 }
 
 /** Highlight the focused stop's dot (keyed on `canonicalId`); pass `null` to clear. */
@@ -150,16 +212,21 @@ export function filterFeaturesNearRoute(
   };
 }
 
-/** Bounding box of every coordinate in a FeatureCollection's LineString geometries, or `null` if empty. */
+/** Bounding box of every coordinate in a FeatureCollection's LineString/MultiLineString
+ * geometries, or `null` if empty. */
 export function boundsOfLineFeatures(fc: GeoJSON.FeatureCollection): maplibregl.LngLatBoundsLike | null {
   let minLon = Infinity, maxLon = -Infinity, minLat = Infinity, maxLat = -Infinity;
+  const grow = ([lon, lat]: GeoJSON.Position) => {
+    if (lon < minLon) minLon = lon;
+    if (lon > maxLon) maxLon = lon;
+    if (lat < minLat) minLat = lat;
+    if (lat > maxLat) maxLat = lat;
+  };
   for (const feature of fc.features) {
-    if (feature.geometry.type !== 'LineString') continue;
-    for (const [lon, lat] of feature.geometry.coordinates) {
-      if (lon < minLon) minLon = lon;
-      if (lon > maxLon) maxLon = lon;
-      if (lat < minLat) minLat = lat;
-      if (lat > maxLat) maxLat = lat;
+    if (feature.geometry.type === 'LineString') {
+      feature.geometry.coordinates.forEach(grow);
+    } else if (feature.geometry.type === 'MultiLineString') {
+      feature.geometry.coordinates.forEach((line) => line.forEach(grow));
     }
   }
   if (minLon === Infinity) return null;
@@ -230,6 +297,12 @@ function addChevronImages(map: MapLibreMap): void {
 /** Diff-segment (line geometry) source + layers — the shared geometry-diff visual language. */
 export function addDiffSegmentLayers(map: MapLibreMap): void {
   map.addSource('diff-segments', { type: 'geojson', data: emptyFC() });
+  // Always carries the focused route's full geometry (every status, every
+  // side), independent of the status checkboxes and of `analysisMode` — so
+  // switching into frequency view (which empties `diff-segments`) doesn't
+  // also erase the glow. Populated via `setSource(map, 'diff-segments-focus-data', ...)`
+  // by the view components, using `ALL_SEGMENT_STATUSES_VISIBLE`.
+  map.addSource('diff-segments-focus-data', { type: 'geojson', data: emptyFC() });
   addChevronImages(map);
 
   // Soft blue glow beneath every status line, tracing the inspector-focused
@@ -241,7 +314,7 @@ export function addDiffSegmentLayers(map: MapLibreMap): void {
   map.addLayer({
     id: 'diff-segments-focus',
     type: 'line',
-    source: 'diff-segments',
+    source: 'diff-segments-focus-data',
     filter: MATCH_NONE,
     layout: { 'line-cap': 'round', 'line-join': 'round' },
     paint: {
@@ -532,6 +605,42 @@ export function attachDiffSegmentClickHandler(
 }
 
 /**
+ * Wires up click-to-focus on the frequency-overlay line: same behaviour as
+ * `attachDiffSegmentClickHandler` (select the route in the inspector without
+ * jumping into the detail view), just keyed on the frequency layer's
+ * `canonicalId` property instead of the segment layers' `canonical_id`.
+ * Independent of the segment handler so a view can wire whichever overlay is
+ * actually visible for the current `analysisMode`.
+ */
+export function attachDiffFrequencyClickHandler(
+  map: MapLibreMap,
+  setDiffRouteFocus: (canonicalId: string, candidates: string[]) => void,
+): void {
+  const layerId = 'diff-frequency-line';
+  map.on('mouseenter', layerId, () => { map.getCanvas().style.cursor = 'pointer'; });
+  map.on('mouseleave', layerId, () => { map.getCanvas().style.cursor = ''; });
+  map.on('click', layerId, (evt) => {
+    const f = evt.features?.[0];
+    if (!f) return;
+    const metersPerPixel =
+      (156543.03392 * Math.cos((evt.lngLat.lat * Math.PI) / 180)) / Math.pow(2, map.getZoom());
+    const targetMeters = 8;
+    const radiusPx = Math.min(4, Math.max(1, targetMeters / metersPerPixel));
+    const bbox: [PointLike, PointLike] = [
+      [evt.point.x - radiusPx, evt.point.y - radiusPx],
+      [evt.point.x + radiusPx, evt.point.y + radiusPx],
+    ];
+    const allFeatures = map.queryRenderedFeatures(bbox, { layers: [layerId] });
+    const candidates = [...new Set(
+      allFeatures.map((feat) => String(feat.properties?.canonicalId ?? '')).filter(Boolean),
+    )];
+    const clickedCanonical = String(f.properties?.canonicalId ?? '') || candidates[0];
+    if (!clickedCanonical) return;
+    setDiffRouteFocus(clickedCanonical, candidates.length ? candidates : [clickedCanonical]);
+  });
+}
+
+/**
  * Wires up click-to-inspect on the diff-stop dots: a click focuses the
  * clicked stop's canonical id via `setDiffStopFocus`, which drives the
  * DiffInspector's stop card. Shared by all three diff views (network, split,
@@ -572,6 +681,12 @@ export function addDiffStopLayers(
   map.addSource('diff-stops', { type: 'geojson', data: emptyFC() });
   map.addSource('diff-ghost', { type: 'geojson', data: emptyFC() });
   map.addSource('diff-arrow', { type: 'geojson', data: emptyFC() });
+  // Always carries every stop (all statuses), independent of the status
+  // checkboxes — so the focused stop's halo survives both the "unchanged off
+  // by default" default and frequency mode zeroing every status toggle.
+  // Populated via `setSource(map, 'diff-stops-focus-data', ...)` by the view
+  // components, using `ALL_STOP_STATUSES_VISIBLE`.
+  map.addSource('diff-stops-focus-data', { type: 'geojson', data: emptyFC() });
 
   const DIFF_COLOR_EXPR: maplibregl.ExpressionSpecification = [
     'match',
@@ -615,7 +730,7 @@ export function addDiffStopLayers(
   map.addLayer({
     id: 'diff-stop-focus-halo',
     type: 'circle',
-    source: 'diff-stops',
+    source: 'diff-stops-focus-data',
     filter: MATCH_NONE,
     paint: {
       'circle-radius': ['interpolate', ['linear'], ['zoom'], 8, 7, 14, 15],
@@ -668,12 +783,47 @@ export function addDiffStopLayers(
   });
 }
 
+/**
+ * Fixed-break color expression for the frequency diff line layer. Relative
+ * mode classifies `percent_delta` (delta as a fraction of the route's
+ * baseline); absolute mode classifies raw `delta` (trips/week). Both sets of
+ * breaks are constants (see `frequency.ts`), so switching modes or toggling
+ * "include added/removed lines" never shifts the class boundaries themselves.
+ */
+export function frequencyColorExpr(mode: FrequencyClassMode): maplibregl.ExpressionSpecification {
+  const breaks = mode === 'relative' ? FREQUENCY_RELATIVE_CLASS_BREAKS : FREQUENCY_ABSOLUTE_CLASS_BREAKS;
+  const property = mode === 'relative' ? 'percent_delta' : 'delta';
+  return [
+    'step', ['get', property],
+    FREQUENCY_BIG_LOSS_COLOR,
+    breaks[0], FREQUENCY_SMALL_LOSS_COLOR,
+    breaks[1], FREQUENCY_NEUTRAL_COLOR,
+    breaks[2], FREQUENCY_SMALL_GAIN_COLOR,
+    breaks[3], FREQUENCY_BIG_GAIN_COLOR,
+  ];
+}
+
 /** Frequency overlay source + layers, scoped to whatever features the caller passes in. */
-export function addDiffFrequencyLayers(map: MapLibreMap): void {
+export function addDiffFrequencyLayers(map: MapLibreMap, classMode: FrequencyClassMode): void {
   map.addSource('diff-frequency', { type: 'geojson', data: emptyFC() });
-  const colorExpr: maplibregl.ExpressionSpecification = [
-    'interpolate', ['linear'], ['get', 'delta_norm'],
-    -1, '#ea580c', 0, '#475569', 1, '#2563eb',
+  const colorExpr = frequencyColorExpr(classMode);
+  // Width now also encodes the *size* of the change (not just zoom): a route
+  // near zero delta renders near the thin end regardless of zoom, while one
+  // at or beyond the p95 cap renders near the thick end — so "how much more
+  // or less frequented" reads directly off the line without a click.
+  // MapLibre allows only one zoom-based interpolate per expression, and it
+  // must be the top-level expression — so zoom is the outer interpolate,
+  // magnitude the (zoom-free) inner one, and the casing's "+2px" offset is
+  // baked into its own copy's stops rather than wrapped around the line's.
+  const magnitudeWidthExpr: maplibregl.ExpressionSpecification = [
+    'interpolate', ['linear'], ['zoom'],
+    8, ['interpolate', ['linear'], ['abs', ['get', 'delta_norm']], 0, 1, 1, 2.2],
+    14, ['interpolate', ['linear'], ['abs', ['get', 'delta_norm']], 0, 1.6, 1, 5.4],
+  ];
+  const magnitudeCasingWidthExpr: maplibregl.ExpressionSpecification = [
+    'interpolate', ['linear'], ['zoom'],
+    8, ['interpolate', ['linear'], ['abs', ['get', 'delta_norm']], 0, 3, 1, 4.2],
+    14, ['interpolate', ['linear'], ['abs', ['get', 'delta_norm']], 0, 3.6, 1, 7.4],
   ];
   map.addLayer({
     id: 'diff-frequency-casing',
@@ -682,7 +832,7 @@ export function addDiffFrequencyLayers(map: MapLibreMap): void {
     layout: { 'line-cap': 'round', 'line-join': 'round' },
     paint: {
       'line-color': '#ffffff',
-      'line-width': ['interpolate', ['linear'], ['zoom'], 8, 3.4, 14, 5.4],
+      'line-width': magnitudeCasingWidthExpr,
       'line-opacity': 0.55,
     },
   });
@@ -693,8 +843,272 @@ export function addDiffFrequencyLayers(map: MapLibreMap): void {
     layout: { 'line-cap': 'round', 'line-join': 'round' },
     paint: {
       'line-color': colorExpr,
-      'line-width': ['interpolate', ['linear'], ['zoom'], 8, 1.4, 14, 3.4],
+      'line-width': magnitudeWidthExpr,
       'line-opacity': 0.95,
     },
+  });
+}
+
+/**
+ * Population-diff overlay: a single fill layer, per-cell population change.
+ * Callers must add this *before* `addDiffSegmentLayers`/`addDiffStopLayers`
+ * (not after, unlike the frequency overlay) so the fill sits at the very
+ * bottom of the diff stack — underneath the basemap-anchored segment/stop
+ * layers — letting routes and stations render on top of the choropleth
+ * instead of being obscured by it.
+ *
+ * Feeds features in two shapes depending on `PopulationDiffResult.mode`
+ * (see population.ts): `pop_delta_density` (diverging loss/gain in
+ * people/hectare, fixed absolute breaks) when feed A and B resolve to
+ * different GHS-POP years, or `pop_norm` (sequential density — more people,
+ * darker fill) when they share a year and a delta would be all zeros. Both
+ * properties never co-occur on the same feature, so `has` picks
+ * the ramp per-feature (in practice uniform across a whole render, since one
+ * `PopulationDiffResult` is all one mode).
+ */
+const POPULATION_DENSITY_STEP_EXPR: maplibregl.ExpressionSpecification = [
+  'step', ['get', 'pop_norm'],
+  POPULATION_LOWEST_COLOR,
+  POPULATION_CLASS_BREAKS[0], POPULATION_LOW_COLOR,
+  POPULATION_CLASS_BREAKS[1], POPULATION_MID_COLOR,
+  POPULATION_CLASS_BREAKS[2], POPULATION_HIGH_COLOR,
+  POPULATION_CLASS_BREAKS[3], POPULATION_HIGHEST_COLOR,
+];
+
+const POPULATION_CHANGE_STEP_EXPR: maplibregl.ExpressionSpecification = [
+  'step', ['get', 'pop_delta_density'],
+  POPULATION_BIG_LOSS_COLOR,
+  POPULATION_DIFF_CLASS_BREAKS[0], POPULATION_SMALL_LOSS_COLOR,
+  POPULATION_DIFF_CLASS_BREAKS[1], POPULATION_NEUTRAL_COLOR,
+  POPULATION_DIFF_CLASS_BREAKS[2], POPULATION_SMALL_GAIN_COLOR,
+  POPULATION_DIFF_CLASS_BREAKS[3], POPULATION_BIG_GAIN_COLOR,
+];
+
+/**
+ * Fixed-break color expression for the population fill layer, mirroring
+ * `frequencyColorExpr`. `'density'` always uses the sequential density ramp
+ * (`pop_norm` — present on every feature regardless of mode, see
+ * `populationDiffToGeoJSON`/`feedPopulationToGeoJSON`). `'change'` uses the
+ * diverging loss/gain ramp (`pop_delta_density`) when present, falling back
+ * to the density ramp for same-GHS-POP-year cells where a delta would be
+ * all zeros.
+ */
+export function populationColorExpr(classMode: PopulationClassMode): maplibregl.ExpressionSpecification {
+  if (classMode === 'density') return POPULATION_DENSITY_STEP_EXPR;
+  return ['case', ['has', 'pop_delta_density'], POPULATION_CHANGE_STEP_EXPR, POPULATION_DENSITY_STEP_EXPR];
+}
+
+/** Opacity companion to `populationColorExpr` — the diverging change ramp
+ * reads better a bit more translucent than the sequential density ramp. */
+export function populationOpacityExpr(
+  classMode: PopulationClassMode,
+): number | maplibregl.ExpressionSpecification {
+  if (classMode === 'density') return POPULATION_FILL_OPACITY;
+  return ['case', ['has', 'pop_delta_density'], POPULATION_DIFF_FILL_OPACITY, POPULATION_FILL_OPACITY];
+}
+
+export function addDiffPopulationLayers(map: MapLibreMap, classMode: PopulationClassMode = 'change'): void {
+  map.addSource('diff-population', { type: 'geojson', data: emptyFC() });
+  map.addLayer({
+    id: 'diff-population-fill',
+    type: 'fill',
+    source: 'diff-population',
+    paint: {
+      'fill-color': populationColorExpr(classMode),
+      'fill-opacity': populationOpacityExpr(classMode),
+    },
+  });
+}
+
+function fmtPop(n: number): string {
+  return Math.round(n).toLocaleString();
+}
+
+function fmtDensity(n: number): string {
+  return n.toLocaleString(undefined, { maximumFractionDigits: 1 });
+}
+
+/** Dwell time before the population tooltip appears — long enough that
+ * sweeping the cursor across the choropleth while just looking at the
+ * colours doesn't paper the map in popups; only pausing over a cell for a
+ * couple seconds surfaces its numbers. */
+const POPULATION_TOOLTIP_DELAY_MS = 2000;
+
+/**
+ * Always prints the same unit the legend classifies by (people/hectare)
+ * alongside the raw people count, so hover text never disagrees with the
+ * fill colour the way the bare people-count tooltip used to — a cell's
+ * colour is always driven by density, so density has to be in the tooltip
+ * too, not just an absolute count that isn't comparable across the
+ * tile-pyramid's varying cell sizes.
+ */
+function populationTooltipHtml(props: Record<string, unknown>): string | null {
+  const {
+    pop_delta: delta,
+    population_a: a,
+    population_b: b,
+    pop_density_a: densityA,
+    pop_density_b: densityB,
+    pop_delta_density: deltaDensity,
+    population,
+    pop_density: density,
+  } = props;
+  if (typeof delta === 'number' && typeof deltaDensity === 'number') {
+    const sign = delta > 0 ? '+' : '';
+    const lines = [`Change: ${sign}${fmtDensity(deltaDensity)}/ha (${sign}${fmtPop(delta)} people)`];
+    if (typeof a === 'number' && typeof b === 'number') {
+      lines.unshift(`${fmtPop(a)} → ${fmtPop(b)} people`);
+    }
+    if (typeof densityA === 'number' && typeof densityB === 'number') {
+      lines.splice(1, 0, `${fmtDensity(densityA)} → ${fmtDensity(densityB)} people/ha`);
+    }
+    return lines.map((line) => `<div>${line}</div>`).join('');
+  }
+  if (typeof population === 'number' && typeof density === 'number') {
+    return `<div>${fmtPop(population)} people (${fmtDensity(density)} people/ha)</div>`;
+  }
+  return null;
+}
+
+/**
+ * Hover tooltip for a population fill layer: shows the cell's population
+ * density (people/hectare — the same unit the fill colour classifies by)
+ * alongside the raw people count for context, plus (in network-diff delta
+ * mode, where `population_a`/`population_b` are set — see
+ * `populationDiffToGeoJSON`) the before/after numbers and the change between
+ * them. Shared by the single-feed map's `analysis-population-fill` layer and
+ * the diff views' `diff-population-fill`.
+ *
+ * Appears only after the cursor settles on a cell for
+ * `POPULATION_TOOLTIP_DELAY_MS` — every `mousemove` restarts the timer, so
+ * sweeping across the choropleth doesn't spawn a popup per cell crossed.
+ */
+export function attachPopulationTooltip(map: MapLibreMap, layerId: string): void {
+  const popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 8 });
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  const clearTimer = () => {
+    if (timer !== null) { clearTimeout(timer); timer = null; }
+  };
+
+  map.on('mousemove', layerId, (evt) => {
+    clearTimer();
+    popup.remove();
+    const props = evt.features?.[0]?.properties;
+    if (!props) return;
+    const lngLat = evt.lngLat;
+    timer = setTimeout(() => {
+      const html = populationTooltipHtml(props);
+      if (html) popup.setLngLat(lngLat).setHTML(html).addTo(map);
+    }, POPULATION_TOOLTIP_DELAY_MS);
+  });
+  map.on('mouseleave', layerId, () => {
+    clearTimer();
+    popup.remove();
+  });
+}
+
+/**
+ * ÖV-Güteklassen absolute-class overlay: one fill layer per source id, keyed
+ * on the 0-6 `class` property via a fixed `match` expression (not a
+ * percentile `step` like population's — A-G is an intrinsic category, not a
+ * data-relative bucket). `sourceId`/`layerId` let this be reused for the
+ * single-feed map (`analysis-gueteklassen`) and both split-view panes.
+ * Must be added before `addDiffSegmentLayers`/`addDiffStopLayers`, same
+ * placement rule as `addDiffPopulationLayers`.
+ */
+export function addGueteklassenLayer(map: MapLibreMap, sourceId: string, layerId: string): void {
+  map.addSource(sourceId, { type: 'geojson', data: emptyFC() });
+  map.addLayer({
+    id: layerId,
+    type: 'fill',
+    source: sourceId,
+    paint: {
+      'fill-color': [
+        'match', ['get', 'class'],
+        0, GUTEKLASSE_COLOR[0],
+        1, GUTEKLASSE_COLOR[1],
+        2, GUTEKLASSE_COLOR[2],
+        3, GUTEKLASSE_COLOR[3],
+        4, GUTEKLASSE_COLOR[4],
+        5, GUTEKLASSE_COLOR[5],
+        6, GUTEKLASSE_COLOR[6],
+        '#00000000',
+      ],
+      'fill-opacity': GUTEKLASSEN_FILL_OPACITY,
+    },
+  });
+}
+
+/** Diff-mode absolute Güteklassen source/layer, source id `diff-gueteklassen`. */
+export function addDiffGueteklassenLayers(map: MapLibreMap): void {
+  addGueteklassenLayer(map, 'diff-gueteklassen', 'diff-gueteklassen-fill');
+}
+
+/**
+ * Network-diff overview's categorical change layer: one of 5 fixed colours
+ * per cell (improved/degraded/unchanged/gained/lost), used only when both
+ * feeds' grids can be compared cell-for-cell (see gueteklassenChangeToGeoJSON).
+ */
+export function addDiffGueteklassenChangeLayers(map: MapLibreMap): void {
+  map.addSource('diff-gueteklassen-change', { type: 'geojson', data: emptyFC() });
+  map.addLayer({
+    id: 'diff-gueteklassen-change-fill',
+    type: 'fill',
+    source: 'diff-gueteklassen-change',
+    paint: {
+      'fill-color': [
+        'match', ['get', 'change'],
+        'improved', GUETEKLASSEN_CHANGE_COLOR.improved,
+        'degraded', GUETEKLASSEN_CHANGE_COLOR.degraded,
+        'unchanged', GUETEKLASSEN_CHANGE_COLOR.unchanged,
+        'gained', GUETEKLASSEN_CHANGE_COLOR.gained,
+        'lost', GUETEKLASSEN_CHANGE_COLOR.lost,
+        '#00000000',
+      ],
+      'fill-opacity': GUTEKLASSEN_FILL_OPACITY,
+    },
+  });
+}
+
+function gueteklassenTooltipHtml(props: Record<string, unknown>): string | null {
+  const { class: cls, class_letter: letterProp, haltestellenkategorie: kategorie, distance_m: dist, change } = props;
+  if (typeof change === 'string') {
+    const { class_a: a, class_b: b } = props;
+    const fromLetter = typeof a === 'number' && a >= 0 ? GUTEKLASSE_LETTER[a] : '–';
+    const toLetter = typeof b === 'number' && b >= 0 ? GUTEKLASSE_LETTER[b] : '–';
+    return `<div>${fromLetter} → ${toLetter}</div><div>${String(change)}</div>`;
+  }
+  if (typeof cls !== 'number') return null;
+  const letter = typeof letterProp === 'string' ? letterProp : GUTEKLASSE_LETTER[cls];
+  const kategorieText = kategorie ? `Kategorie ${String(kategorie)}` : '';
+  const distText = typeof dist === 'number' ? `${dist} m to nearest stop` : '';
+  return `<div>Güteklasse ${letter}</div><div>${[kategorieText, distText].filter(Boolean).join(', ')}</div>`;
+}
+
+/** Hover tooltip for a Güteklassen fill layer (absolute or change), same
+ * dwell-timer pattern as `attachPopulationTooltip`. */
+export function attachGueteklassenTooltip(map: MapLibreMap, layerId: string): void {
+  const popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 8 });
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  const clearTimer = () => {
+    if (timer !== null) { clearTimeout(timer); timer = null; }
+  };
+
+  map.on('mousemove', layerId, (evt) => {
+    clearTimer();
+    popup.remove();
+    const props = evt.features?.[0]?.properties;
+    if (!props) return;
+    const lngLat = evt.lngLat;
+    timer = setTimeout(() => {
+      const html = gueteklassenTooltipHtml(props);
+      if (html) popup.setLngLat(lngLat).setHTML(html).addTo(map);
+    }, POPULATION_TOOLTIP_DELAY_MS);
+  });
+  map.on('mouseleave', layerId, () => {
+    clearTimer();
+    popup.remove();
   });
 }
